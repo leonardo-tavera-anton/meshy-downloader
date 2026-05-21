@@ -8,7 +8,7 @@
 
 **The ultimate companion for Meshy.ai creators. Download your 3D models and textures with a single click.**
 
-[Features](#-key-features) • [Installation](#-installation) • [How it Works](#-how-it-works) • [Security](#-security--privacy)
+[Features](#-key-features) • [Installation](#-installation) • [How it Works](#%EF%B8%8F-how-it-works) • [Security](#-security--privacy)
 
 </div>
 
