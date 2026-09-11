@@ -1,19 +1,13 @@
 <!DOCTYPE html>
+<!--popup.html-->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meshy Downloader</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<div class="format-selector" style="margin: 10px 0; display: flex; align-items: center; justify-content: space-between;">
-  <label for="formatSelect" style="color: #ccc; font-size: 13px;">Formato de salida:</label>
-  <select id="formatSelect" style="background: #2a2a3c; color: #fff; border: 1px solid #444; padding: 4px 8px; border-radius: 4px;">
-    <option value="glb" selected>GLB (Original)</option>
-    <option value="obj">OBJ (.obj)</option>
-    <option value="stl">STL (.stl - 3D Print)</option>
-  </select>
-</div>
   <div class="container">
     <div class="header">
       <div class="header-content">
@@ -23,6 +17,16 @@
           <p class="subtitle">Download 3D models effortlessly</p>
         </div>
       </div>
+    </div>
+
+    <!-- Selector de Formato Integrado -->
+    <div class="format-selector" style="margin: 12px 0; display: flex; align-items: center; justify-content: space-between; background: #252538; padding: 8px 12px; border-radius: 6px; border: 1px solid #3a3a52;">
+      <label for="formatSelect" style="color: #ccc; font-size: 13px; font-weight: 500;">Formato de salida:</label>
+      <select id="formatSelect" style="background: #1e1e2f; color: #fff; border: 1px solid #444; padding: 4px 8px; border-radius: 4px; outline: none; cursor: pointer;">
+        <option value="glb" selected>GLB (Original)</option>
+        <option value="obj">OBJ (.obj)</option>
+        <option value="stl">STL (.stl - 3D Print)</option>
+      </select>
     </div>
 
     <div class="status-box" id="status">

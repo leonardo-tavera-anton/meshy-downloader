@@ -33,20 +33,24 @@ async function loadTasks() {
   chrome.runtime.sendMessage({ action: 'getTasks' }, async (response) => {
     statusDiv.classList.remove('loading');
 
-    if (response.success && response.tasks.length > 0) {
+    if (response && response.success && response.tasks.length > 0) {
       statusDiv.innerHTML = `<span class="status-icon">✓</span><span class="status-text">${response.tasks.length} model(s) found</span>`;
       statusDiv.classList.add('success');
 
       displayTasks(response.tasks, tasksList);
 
     } else {
-      statusDiv.innerHTML = `<span class="status-icon">❌</span><span class="status-text">${response.error || 'No models found'}</span>`;
+      statusDiv.innerHTML = `<span class="status-icon">❌</span><span class="status-text">${(response && response.error) || 'No models found'}</span>`;
       statusDiv.classList.add('error');
     }
   });
 }
 
 function displayTasks(tasks, tasksList) {
+  // Obtener el formato seleccionado globalmente en el select superior
+  const formatSelect = document.getElementById('formatSelect');
+  const currentFormat = formatSelect ? formatSelect.value.toUpperCase() : 'GLB';
+
   tasks.forEach((task) => {
     const taskEl = document.createElement('div');
     taskEl.className = 'task-card';
@@ -73,9 +77,11 @@ function displayTasks(tasks, tasksList) {
         </div>`
       : '';
 
-    const isMeshy = task.modelUrl.includes('.meshy') || (task.parts && task.parts.length > 0);
-    const downloadLabel = (task.parts && task.parts.length > 0) ? `Download Parts (${task.parts.length})` : (isMeshy ? 'Download GLB' : 'Download Model');
-    const downloadFilename = `meshy_${task.id}.glb`;
+    const downloadLabel = (task.parts && task.parts.length > 0) 
+      ? `Download Parts (${task.parts.length})` 
+      : `Download ${currentFormat}`;
+      
+    const downloadFilename = `meshy_${task.id}`;
 
     const hasParts = task.parts && task.parts.length > 0;
     const partsAttr = hasParts ? `data-parts='${JSON.stringify(task.parts)}'` : '';
@@ -126,12 +132,17 @@ function displayTasks(tasks, tasksList) {
       const partsStr = btn.dataset.parts;
       const parts = partsStr ? JSON.parse(partsStr) : null;
 
+      // LEE EL FORMATO SELECCIONADO AL MOMENTO DE DAR CLIC
+      const formatSelect = document.getElementById('formatSelect');
+      const targetFormat = formatSelect ? formatSelect.value : 'glb';
+
       chrome.runtime.sendMessage({
         action: 'downloadModel',
         taskId: taskId,
         modelUrl: modelUrl,
         filename: filename,
-        parts: parts
+        parts: parts,
+        targetFormat: targetFormat // <--- ENVÍA EL FORMATO AL BACKGROUND
       });
 
       btn.innerHTML = '<span class="download-icon">⏳</span><span class="download-text">Starting...</span>';
