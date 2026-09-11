@@ -51,7 +51,6 @@ async function getTasks() {
       };
 
       try {
-        // Step 1: Fetch root tasks (all pages)
         let allRootTasks = [];
         let pageNum = 1;
         const pageSize = 50;
@@ -77,12 +76,10 @@ async function getTasks() {
           }
         }
 
-        // Filter to only keep root tasks (avoid duplicates with children)
         allRootTasks = allRootTasks.filter(t => !t.rootId || t.rootId === t.id);
 
         console.log(`[Meshy] Found ${allRootTasks.length} root tasks`);
 
-        // Step 2: For each root task, fetch related tasks to find the best (textured) version
         const finalTasks = await Promise.all(allRootTasks.map(async (rootTask) => {
           try {
             const relatedUrl = `https://api.meshy.ai/web/v2/tasks/${rootTask.id}/related?sortBy=-created_at&pageNum=1&pageSize=20`;
@@ -93,7 +90,6 @@ async function getTasks() {
               const relatedTasks = extractTasksList(relData);
 
               if (relatedTasks.length > 0) {
-                // Pick the best task: prefer texture > generate > draft phase, and SUCCEEDED status
                 const bestTask = relatedTasks.find(t => t.phase === 'texture' && t.status === 'SUCCEEDED')
                   || relatedTasks.find(t => t.phase === 'generate' && t.status === 'SUCCEEDED')
                   || relatedTasks.find(t => t.status === 'SUCCEEDED')
@@ -106,7 +102,6 @@ async function getTasks() {
             console.warn(`[Meshy] Failed to fetch related for ${rootTask.id}:`, e.message);
           }
 
-          // Fallback: use the root task itself
           return mapTask(rootTask);
         }));
 
@@ -138,7 +133,6 @@ function mapTask(task, rootTask) {
   const prompt = task.args?.draft?.prompt || task.args?.texture?.prompt || task.prompt || rootTask?.args?.draft?.prompt || '';
   const texSet = task.result?.texture?.textureUrls?.[0] || {};
   
-  // Buscar en todas las ubicaciones posibles donde Meshy almacena las partes o sub-modelos
   const rawParts = task.result?.parts || task.result?.sub_models || task.result?.split_parts || task.result?.children || task.parts || task.sub_models || [];
   const parts = Array.isArray(rawParts) ? rawParts.map((p, idx) => ({
     url: p.modelUrl || p.model_url || p.url || p,
@@ -150,7 +144,7 @@ function mapTask(task, rootTask) {
     title: task.name || prompt || 'Sans titre',
     status: task.status,
     modelUrl: task.result?.texture?.modelUrl || task.result?.generate?.modelUrl || task.result?.draft?.modelUrl || task.result?.stylize?.modelUrl || task.model_url || task.modelUrl || '',
-    parts: parts, // Arreglo de partes detectadas
+    parts: parts,
     createdAt: task.created_at || task.createdAt,
     prompt: prompt,
     imageUrl: task.result?.previewUrl || rootTask?.result?.previewUrl || '',
@@ -170,7 +164,6 @@ function mapTask(task, rootTask) {
 async function downloadModel(taskId, modelUrl, filename, parts) {
   const hasParts = parts && Array.isArray(parts) && parts.length > 0;
   
-  // Si tiene múltiples partes o es un archivo desencriptable .meshy
   if (hasParts || (modelUrl && modelUrl.includes('.meshy'))) {
     const tabs = await chrome.tabs.query({ url: ['https://meshy.ai/*', 'https://www.meshy.ai/*'] });
     if (tabs.length === 0) {
@@ -187,7 +180,6 @@ async function downloadModel(taskId, modelUrl, filename, parts) {
       requestId: taskId
     });
   } else if (modelUrl) {
-    // Descarga directa para archivos no encriptados de una sola pieza
     chrome.downloads.download({
       url: modelUrl,
       filename: `meshy_models/${filename}`,

@@ -228,7 +228,10 @@ async function decryptAndDownload(modelInput, filename, requestId) {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'decryptAndDownload') {
     console.log('[Meshy DL] Received decrypt request:', request.requestId);
-    const payload = request.parts || request.modelUrl;
+    
+    // Asegurar que use las partes si vienen definidas, de lo contrario usa el modelUrl único
+    const payload = (request.parts && request.parts.length > 0) ? request.parts : request.modelUrl;
+    
     decryptAndDownload(payload, request.filename, request.requestId);
     sendResponse({ success: true });
   }
