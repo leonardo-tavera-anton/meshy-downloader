@@ -8,10 +8,10 @@ chrome.runtime.onMessage.addListener((request) => {
     const btn = document.querySelector(`.btn-download[data-id="${request.requestId}"]`);
     if (!btn) return;
 
-    if (request.status === 'fetching') {
-      btn.innerHTML = '<span class="download-icon">📥</span><span class="download-text">Fetching...</span>';
-    } else if (request.status === 'decrypting') {
-      btn.innerHTML = '<span class="download-icon">🔓</span><span class="download-text">Decrypting...</span>';
+    if (request.status.startsWith('fetching')) {
+      btn.innerHTML = `<span class="download-icon">📥</span><span class="download-text">${request.status}</span>`;
+    } else if (request.status.startsWith('decrypting')) {
+      btn.innerHTML = `<span class="download-icon">🔓</span><span class="download-text">${request.status}</span>`;
     } else if (request.status === 'done') {
       btn.innerHTML = '<span class="download-icon">✅</span><span class="download-text">Done!</span>';
     } else if (request.status === 'error') {
@@ -73,9 +73,12 @@ function displayTasks(tasks, tasksList) {
         </div>`
       : '';
 
-    const isMeshy = task.modelUrl.includes('.meshy');
-    const downloadLabel = isMeshy ? 'Download GLB' : 'Download Model';
-    const downloadFilename = isMeshy ? `meshy_${task.id}.glb` : `meshy_${task.id}.glb`;
+    const isMeshy = task.modelUrl.includes('.meshy') || (task.parts && task.parts.length > 0);
+    const downloadLabel = (task.parts && task.parts.length > 0) ? `Download Parts (${task.parts.length})` : (isMeshy ? 'Download GLB' : 'Download Model');
+    const downloadFilename = `meshy_${task.id}.glb`;
+
+    const hasParts = task.parts && task.parts.length > 0;
+    const partsAttr = hasParts ? `data-parts='${JSON.stringify(task.parts)}'` : '';
 
     const textureCount = task.textures ? Object.values(task.textures).filter(u => u).length : 0;
     const hasTextures = textureCount > 0;
@@ -100,7 +103,7 @@ function displayTasks(tasks, tasksList) {
         </div>
       </div>
       <div class="task-actions">
-        <button class="btn-download" data-id="${task.id}" data-url="${task.modelUrl}" data-filename="${downloadFilename}">
+        <button class="btn-download" data-id="${task.id}" data-url="${task.modelUrl}" data-filename="${downloadFilename}" ${partsAttr}>
           <span class="download-icon">⬇️</span>
           <span class="download-text">${downloadLabel}</span>
         </button>
@@ -120,12 +123,15 @@ function displayTasks(tasks, tasksList) {
       const taskId = btn.dataset.id;
       const modelUrl = btn.dataset.url;
       const filename = btn.dataset.filename;
+      const partsStr = btn.dataset.parts;
+      const parts = partsStr ? JSON.parse(partsStr) : null;
 
       chrome.runtime.sendMessage({
         action: 'downloadModel',
         taskId: taskId,
         modelUrl: modelUrl,
-        filename: filename
+        filename: filename,
+        parts: parts
       });
 
       btn.innerHTML = '<span class="download-icon">⏳</span><span class="download-text">Starting...</span>';
