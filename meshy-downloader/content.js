@@ -177,46 +177,47 @@ function initDecryptWorker() {
   });
 }
 
-async function decryptAndDownload(modelUrl, filename, requestId) {
+async function decryptAndDownload(modelInput, filename, requestId) {
   try {
-    // Step 1: Init worker
-    console.log('[Meshy DL] Starting decrypt for:', requestId);
     await initDecryptWorker();
 
-    // Step 2: Fetch .meshy file
-    chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: 'fetching' });
-    console.log('[Meshy DL] Fetching .meshy file...');
+    const parts = Array.isArray(modelInput) ? modelInput : [{ url: modelInput, filename: filename }];
 
-    const response = await fetch(modelUrl);
-    if (!response.ok) throw new Error('Fetch failed: ' + response.status);
-    const meshyData = await response.arrayBuffer();
-    console.log('[Meshy DL] Got', meshyData.byteLength, 'bytes');
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const currentUrl = part.url || part;
+      const currentFilename = part.filename || (parts.length > 1 ? `part_${i + 1}_${filename}` : filename);
 
-    // Step 3: Decrypt
-    chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: 'decrypting' });
-    console.log('[Meshy DL] Decrypting...');
+      chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: `fetching (${i + 1}/${parts.length})` });
+      console.log(`[Meshy DL] Fetching part ${i + 1}/${parts.length}:`, currentUrl);
 
-    const id = ++opCounter;
-    const glbData = await new Promise((resolve, reject) => {
-      pendingOps[id] = { resolve, reject };
-      decryptWorker.postMessage({ id, type: 'process', data: meshyData }, [meshyData]);
-    });
-    console.log('[Meshy DL] ✓ Decrypted to', glbData.byteLength, 'bytes');
+      const response = await fetch(currentUrl);
+      if (!response.ok) throw new Error(`Fetch failed for part ${i + 1}: ${response.status}`);
+      const meshyData = await response.arrayBuffer();
 
-    // Step 4: Download via <a> tag
-    const blob = new Blob([glbData], { type: 'model/gltf-binary' });
-    const blobUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = blobUrl;
-    a.download = filename;
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+      chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: `decrypting (${i + 1}/${parts.length})` });
+      console.log(`[Meshy DL] Decrypting part ${i + 1}...`);
+
+      const id = ++opCounter;
+      const glbData = await new Promise((resolve, reject) => {
+        pendingOps[id] = { resolve, reject };
+        decryptWorker.postMessage({ id, type: 'process', data: meshyData }, [meshyData]);
+      });
+
+      const blob = new Blob([glbData], { type: 'model/gltf-binary' });
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = currentFilename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+      console.log(`[Meshy DL] ✓ Downloaded part:`, currentFilename);
+    }
 
     chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: 'done' });
-    console.log('[Meshy DL] ✓ Download triggered:', filename);
   } catch (err) {
     console.error('[Meshy DL] Decrypt failed:', err);
     chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: 'error', error: err.message });
@@ -227,7 +228,8 @@ async function decryptAndDownload(modelUrl, filename, requestId) {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'decryptAndDownload') {
     console.log('[Meshy DL] Received decrypt request:', request.requestId);
-    decryptAndDownload(request.modelUrl, request.filename, request.requestId);
+    const payload = request.parts || request.modelUrl;
+    decryptAndDownload(payload, request.filename, request.requestId);
     sendResponse({ success: true });
   }
 });
