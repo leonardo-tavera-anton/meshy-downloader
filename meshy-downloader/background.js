@@ -138,8 +138,8 @@ function mapTask(task, rootTask) {
   const prompt = task.args?.draft?.prompt || task.args?.texture?.prompt || task.prompt || rootTask?.args?.draft?.prompt || '';
   const texSet = task.result?.texture?.textureUrls?.[0] || {};
   
-  // Extraer el arreglo de partes si existe (por ejemplo en modelos divididos/multicolor)
-  const rawParts = task.result?.parts || task.result?.sub_models || task.result?.split_parts || task.parts || task.sub_models || [];
+  // Buscar en todas las ubicaciones posibles donde Meshy almacena las partes o sub-modelos
+  const rawParts = task.result?.parts || task.result?.sub_models || task.result?.split_parts || task.result?.children || task.parts || task.sub_models || [];
   const parts = Array.isArray(rawParts) ? rawParts.map((p, idx) => ({
     url: p.modelUrl || p.model_url || p.url || p,
     filename: p.name ? `${p.name}.glb` : `parte_${idx + 1}.glb`
@@ -150,7 +150,7 @@ function mapTask(task, rootTask) {
     title: task.name || prompt || 'Sans titre',
     status: task.status,
     modelUrl: task.result?.texture?.modelUrl || task.result?.generate?.modelUrl || task.result?.draft?.modelUrl || task.result?.stylize?.modelUrl || task.model_url || task.modelUrl || '',
-    parts: parts, // Arreglo de partes para descarga múltiple
+    parts: parts, // Arreglo de partes detectadas
     createdAt: task.created_at || task.createdAt,
     prompt: prompt,
     imageUrl: task.result?.previewUrl || rootTask?.result?.previewUrl || '',
