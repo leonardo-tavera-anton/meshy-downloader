@@ -90,7 +90,7 @@ function createIcon(text) {
 function isSafeImageUrl(value) {
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' && ['api.meshy.ai', 'assets.meshy.ai'].includes(url.hostname);
+    return url.protocol === 'https:' && ['api.meshy.ai', 'assets.meshy.ai', 'cdn.meshy.ai'].includes(url.hostname);
   } catch (error) {
     return false;
   }
@@ -135,7 +135,11 @@ function displayTasks(tasks) {
     const modelButton = createElement('button', 'btn-download');
     modelButton.type = 'button';
     modelButton.dataset.id = String(task.id);
-    modelButton.append(createIcon('⬇️'), createElement('span', 'download-text', task.parts?.length ? `Descargar partes (${task.parts.length})` : `Descargar ${formatSelect.value.toUpperCase()}`));
+    const partCount = task.parts?.length || task.partCount || 0;
+    const downloadLabel = partCount > 1
+      ? `Descargar modelo cortado (${partCount} partes)`
+      : `Descargar ${formatSelect.value.toUpperCase()}`;
+    modelButton.append(createIcon('⬇️'), createElement('span', 'download-text', downloadLabel));
     modelButton.addEventListener('click', () => downloadModel(task, modelButton));
     actions.appendChild(modelButton);
 
@@ -168,12 +172,16 @@ async function downloadModel(task, button) {
       modelUrl: task.modelUrl,
       filename: `meshy_${task.id}`,
       parts: task.parts?.length ? task.parts : null,
-      targetFormat: formatSelect.value
+      targetFormat: formatSelect.value,
+      modelUrls: task.modelUrls
     });
     if (!response?.success) throw new Error(response?.error || 'No se pudo iniciar la descarga.');
   } catch (error) {
     setButtonState(button, '❌', 'Error');
     button.title = error.message;
+    if (error.message.includes('Ctrl+F5')) {
+      setStatus('↻', 'Recarga Meshy con Ctrl+F5 y vuelve a intentarlo.', 'error');
+    }
     button.disabled = false;
   }
 }

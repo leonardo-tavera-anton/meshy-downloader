@@ -1,7 +1,7 @@
 // background.js
 
 const API_ORIGIN = 'https://api.meshy.ai';
-const ALLOWED_DOWNLOAD_HOSTS = new Set(['api.meshy.ai', 'assets.meshy.ai']);
+const ALLOWED_DOWNLOAD_HOSTS = new Set(['api.meshy.ai', 'assets.meshy.ai', 'cdn.meshy.ai']);
 const MAX_TASK_PAGES = 20;
 const MAX_TASKS = 500;
 
@@ -33,7 +33,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'downloadModel') {
-    downloadModel(request.taskId, request.modelUrl, request.filename, request.parts, request.targetFormat)
+    downloadModel(request.taskId, request.modelUrl, request.filename, request.parts, request.targetFormat, request.modelUrls)
       .then(() => sendResponse({ success: true }))
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
@@ -91,6 +91,18 @@ function safeFilename(value, fallback = 'modelo') {
   return normalized.replace(/^\.+/, '').slice(0, 100) || fallback;
 }
 
+function isDirectCdnUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && (
+      ['assets.meshy.ai', 'cdn.meshy.ai'].includes(url.hostname)
+      || (url.hostname === 'api.meshy.ai' && url.pathname.startsWith('/misc/cdn-models/'))
+    );
+  } catch (error) {
+    return false;
+  }
+}
+
 async function getTasks() {
   return new Promise((resolve, reject) => {
     chrome.storage.local.get('meshy_token', async (result) => {
@@ -145,7 +157,8 @@ async function getTasks() {
               const relatedTasks = extractTasksList(relData);
 
               if (relatedTasks.length > 0) {
-                const bestTask = relatedTasks.find(t => t.phase === 'texture' && t.status === 'SUCCEEDED')
+                const bestTask = relatedTasks.find(t => t.status === 'SUCCEEDED' && (t.part_count > 1 || t.model_urls?.glb))
+                  || relatedTasks.find(t => t.phase === 'texture' && t.status === 'SUCCEEDED')
                   || relatedTasks.find(t => t.phase === 'generate' && t.status === 'SUCCEEDED')
                   || relatedTasks.find(t => t.status === 'SUCCEEDED')
                   || relatedTasks[0];
@@ -181,9 +194,25 @@ function extractTasksList(data) {
   return [];
 }
 
+function getModelUrls(task) {
+  const sources = [
+    task?.model_urls,
+    task?.result?.model_urls,
+    task?.result?.generate?.model_urls,
+    task?.result?.texture?.model_urls,
+    task?.result?.draft?.model_urls
+  ];
+
+  return sources.find(source => source && typeof source === 'object' && (source.glb || source.gltf || source.obj || source.stl))
+    || sources.find(source => source && typeof source === 'object')
+    || {};
+}
+
 function mapTask(task, rootTask) {
   const prompt = task.args?.draft?.prompt || task.args?.texture?.prompt || task.prompt || rootTask?.args?.draft?.prompt || '';
   const texSet = task.result?.texture?.textureUrls?.[0] || {};
+  const modelUrls = getModelUrls(task);
+  const rootModelUrls = getModelUrls(rootTask);
   
   // Extraer partes ya sea en Array u Objetos clave-valor
   const rawParts = task.result?.parts || task.result?.sub_models || task.result?.split_parts || task.result?.children || task.result?.model_urls || task.parts || task.sub_models || [];
@@ -201,14 +230,16 @@ function mapTask(task, rootTask) {
     }));
   }
 
-  const modelUrl = task.result?.texture?.modelUrl || task.result?.generate?.modelUrl || task.result?.draft?.modelUrl || task.result?.stylize?.modelUrl || task.model_url || task.modelUrl || '';
+  const modelUrl = modelUrls.glb || modelUrls.gltf || rootModelUrls.glb || rootModelUrls.gltf || task.result?.texture?.modelUrl || task.result?.generate?.modelUrl || task.result?.draft?.modelUrl || task.result?.stylize?.modelUrl || task.model_url || task.modelUrl || '';
 
   return {
     id: task.id,
     title: task.name || prompt || 'Modelo 3D',
     status: task.status,
     modelUrl: modelUrl,
+    modelUrls: modelUrls,
     parts: parts,
+    partCount: Number(task.part_count || task.result?.part_count || rootTask?.part_count || 0),
     createdAt: task.created_at || task.createdAt,
     prompt: prompt,
     imageUrl: task.result?.previewUrl || rootTask?.result?.previewUrl || '',
@@ -225,11 +256,22 @@ function mapTask(task, rootTask) {
   };
 }
 
-async function downloadModel(taskId, modelUrl, filename, parts, targetFormat = 'obj') {
+async function downloadModel(taskId, modelUrl, filename, parts, targetFormat = 'obj', modelUrls = null) {
   const hasParts = parts && Array.isArray(parts) && parts.length > 0;
   const safeFormat = ['glb', 'obj', 'stl'].includes(targetFormat) ? targetFormat : 'glb';
+  const nativeFormatUrl = modelUrls?.[safeFormat] || '';
   const candidates = hasParts ? parts.map(part => part?.url) : [modelUrl];
   if (!candidates.every(isAllowedUrl)) throw new Error('La URL del modelo no pertenece a un dominio Meshy permitido.');
+
+  if (!hasParts && nativeFormatUrl && isAllowedUrl(nativeFormatUrl) && isDirectCdnUrl(nativeFormatUrl)) {
+    const extension = safeFormat === 'glb' ? 'glb' : safeFormat;
+    await chrome.downloads.download({
+      url: nativeFormatUrl,
+      filename: `meshy_models/${safeFilename(filename)}.${extension}`,
+      saveAs: true
+    });
+    return;
+  }
 
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true, url: ['https://meshy.ai/*', 'https://www.meshy.ai/*'] });
   if (tabs.length === 0) {
@@ -240,14 +282,21 @@ async function downloadModel(taskId, modelUrl, filename, parts, targetFormat = '
   const baseFilename = safeFilename(filename?.replace(/\.(meshy|glb|obj|stl)$/i, ''));
   const outFilename = `${baseFilename}${ext}`;
 
-  await chrome.tabs.sendMessage(tabs[0].id, {
-    action: 'decryptAndDownload',
-    modelUrl: modelUrl,
-    parts: hasParts ? parts : null,
-    filename: outFilename,
-    targetFormat: safeFormat,
-    requestId: taskId
-  });
+  try {
+    await chrome.tabs.sendMessage(tabs[0].id, {
+      action: 'decryptAndDownload',
+      modelUrl: modelUrl,
+      parts: hasParts ? parts : null,
+      filename: outFilename,
+      targetFormat: safeFormat,
+      requestId: taskId
+    });
+  } catch (error) {
+    if (error.message?.includes('Receiving end does not exist')) {
+      throw new Error('Meshy necesita recargarse para conectar la extensión. Pulsa Ctrl+F5 en la pestaña de Meshy y vuelve a intentarlo.');
+    }
+    throw error;
+  }
 }
 
 async function downloadTexture(taskId, textureUrl, filename) {

@@ -14,9 +14,9 @@
         try {
             if (msg && msg.type === 'authorize' && msg.hostname && msg.signature) {
                 publish('__meshy_auth__', {
-                    hostname: String(msg.hostname),
-                    timestamp: Number(msg.timestamp),
-                    signature: String(msg.signature)
+                    hostname: msg.hostname,
+                    timestamp: msg.timestamp,
+                    signature: msg.signature
                 });
             }
         } catch (e) {

@@ -12,7 +12,8 @@
     "https://api.meshy.ai/*",
     "https://meshy.ai/*",
     "https://www.meshy.ai/*",
-    "https://assets.meshy.ai/*"
+    "https://assets.meshy.ai/*",
+    "https://cdn.meshy.ai/*"
   ],
   "background": {
     "service_worker": "background.js"

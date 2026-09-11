@@ -58,7 +58,7 @@ let wasmAuth = null;
 window.addEventListener('__meshy_auth__', (e) => {
   try {
     const auth = JSON.parse(e.detail);
-    if (!auth.hostname || !auth.signature || !Number.isFinite(auth.timestamp)) return;
+    if (!auth.hostname || !auth.signature || (typeof auth.timestamp !== 'number' && typeof auth.timestamp !== 'string')) return;
     wasmAuth = auth;
     chrome.runtime.sendMessage({ action: 'saveWasmAuth', auth: wasmAuth });
   } catch (e) {
@@ -75,10 +75,9 @@ let opCounter = 0;
 
 function initDecryptWorker() {
   return new Promise((resolve, reject) => {
-    if (decryptWorker && workerReady) {
-      resolve();
-      return;
-    }
+    if (decryptWorker) decryptWorker.terminate();
+    decryptWorker = null;
+    workerReady = false;
 
     if (!wasmAuth) {
       reject(new Error('Aún no se capturan las credenciales WASM. Haz clic o interactúa con el modelo 3D en Meshy para generarlas.'));
@@ -149,14 +148,20 @@ function isGlbBuffer(data) {
 }
 
 async function fetchModelBuffer(url) {
-  const stored = await chrome.storage.local.get('meshy_token');
-  const headers = {};
-  if (stored.meshy_token) headers.Authorization = `Bearer ${stored.meshy_token}`;
+  const parsedUrl = new URL(url);
+  const isApiDownload = parsedUrl.hostname === 'api.meshy.ai';
+  const requestOptions = { credentials: 'omit', cache: 'no-store' };
 
-  const response = await fetch(url, {
-    credentials: 'include',
-    headers
-  });
+  if (isApiDownload) {
+    const stored = await chrome.storage.local.get('meshy_token');
+    if (stored.meshy_token) {
+      requestOptions.headers = { Authorization: `Bearer ${stored.meshy_token}` };
+    }
+  }
+
+  // API model proxies may require the bearer token; public CDN URLs must stay
+  // credential-free to avoid a rejected CORS preflight.
+  const response = await fetch(parsedUrl.href, requestOptions);
   if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
   return response.arrayBuffer();
 }
@@ -164,6 +169,22 @@ async function fetchModelBuffer(url) {
 function safeFilename(value, fallback = 'modelo') {
   const normalized = String(value || fallback).replace(/[^a-zA-Z0-9._-]/g, '_');
   return normalized.replace(/^\.+/, '').slice(0, 100) || fallback;
+}
+
+function processWithWorker(inputBuffer, mode = 'default') {
+  const id = ++opCounter;
+  return new Promise((resolve, reject) => {
+    pendingOps[id] = { resolve, reject };
+    decryptWorker.postMessage({ id, type: 'process', mode, data: inputBuffer }, [inputBuffer]);
+  });
+}
+
+function describeBuffer(data) {
+  const buffer = ensureArrayBuffer(data);
+  if (!(buffer instanceof ArrayBuffer)) return 'respuesta no binaria';
+  const bytes = new Uint8Array(buffer, 0, Math.min(8, buffer.byteLength));
+  const signature = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(' ');
+  return `${buffer.byteLength} bytes (firma: ${signature || 'vacía'})`;
 }
 
 async function decryptAndDownload(modelInput, filename, requestId, targetFormat = 'glb') {
@@ -188,11 +209,14 @@ async function decryptAndDownload(modelInput, filename, requestId, targetFormat 
       // proprietary decoder can turn a valid file into an invalid payload.
       if (!isGlbBuffer(rawBuffer) && decryptWorker && workerReady) {
         chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: `decrypting (${i + 1}/${parts.length})` });
-        const id = ++opCounter;
-        rawBuffer = await new Promise((resolve, reject) => {
-          pendingOps[id] = { resolve, reject };
-          decryptWorker.postMessage({ id, type: 'process', data: rawBuffer }, [rawBuffer]);
-        });
+        const originalBuffer = rawBuffer.slice(0);
+        rawBuffer = await processWithWorker(rawBuffer, 'default');
+
+        // Textured/postprocessed models use Meshy's texture-editor decoder.
+        // Keep the normal route first for older model versions.
+        if (!isGlbBuffer(rawBuffer)) {
+          rawBuffer = await processWithWorker(originalBuffer, 'texture-editor');
+        }
       }
 
       const glbData = ensureArrayBuffer(rawBuffer);
@@ -210,11 +234,13 @@ async function decryptAndDownload(modelInput, filename, requestId, targetFormat 
 // ===== CONVERSION & DOWNLOAD UTILS =====
 async function processAndSaveBlob(glbData, targetFormat, currentFilename) {
   const buffer = ensureArrayBuffer(glbData);
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 4) {
+    throw new Error(`Meshy devolvió una respuesta inválida: ${describeBuffer(buffer)}.`);
+  }
   const view = new DataView(buffer);
-  
   const magic = view.getUint32(0, true);
   if (magic !== 0x46544C67) {
-    throw new Error('El archivo descargado sigue cifrado. Asegúrate de hacer clic en el modelo 3D en Meshy para generar las credenciales WASM.');
+    throw new Error(`Meshy no devolvió un GLB después del descifrado: ${describeBuffer(buffer)}.`);
   }
 
   try {
@@ -396,6 +422,11 @@ function triggerDownload(blob, filename) {
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'ping') {
+    sendResponse({ success: true });
+    return;
+  }
+
   if (request.action === 'decryptAndDownload') {
     console.log('[Meshy DL] Received decrypt request:', request.requestId);
     
