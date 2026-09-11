@@ -5,7 +5,6 @@
   "description": "Télécharge les modèles 3D depuis Meshy.ai",
   "permissions": [
     "storage",
-    "webRequest",
     "tabs",
     "downloads"
   ],

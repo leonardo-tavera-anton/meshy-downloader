@@ -74,20 +74,20 @@ graph TD
 
 ### Technical Stack
 - **Manifest V3**: Compliant with the latest Chrome extension standards.
-- **Chrome Storage API**: Securely holds session data locally.
-- **Native Decryption**: Handles proprietary Meshy file formats on-the-fly.
+- **Chrome Storage API**: Holds the session token locally and removes it after an unauthorized API response.
+- **Browser-side Decryption**: Uses Meshy's page worker credentials locally when available, then converts GLB geometry to OBJ or STL.
 
 ---
 
-## 🔄 Conversion .meshy → .glb
+## 🔄 Conversion and export formats
 
-Meshy.ai uses a proprietary `.meshy` format for its latest models. This extension includes a **Native Decryption Engine** that handles this format automatically.
+Meshy.ai may deliver encrypted model data through its browser worker. The extension uses that worker from the active Meshy tab when the required authorization data has been observed.
 
 ### How it works:
-1.  **Detection**: The extension identifies if a model is stored in the encrypted `.meshy` format.
-2.  **Native Bridge**: It securely interfaces with Meshy's own decryption worker (`loader-worker.js`) directly within your browser tab.
-3.  **Real-time Decryption**: The `.meshy` file is processed through the site's WASM module to reconstruct the original `.glb` data.
-4.  **Automatic Export**: The resulting GLB is then triggered as a standard download, ensuring you get the highest quality model compatible with Blender, Unity, and Unreal Engine.
+1.  **Detection**: The extension identifies when Meshy's model data requires the browser worker.
+2.  **Browser Bridge**: It communicates with Meshy's decryption worker directly within the active browser tab.
+3.  **Local Processing**: The data is reconstructed as GLB, then optionally converted to OBJ or binary STL in the content script.
+4.  **Automatic Export**: The result is triggered as a standard browser download for use in Blender, Unity, and Unreal Engine.
 
 > [!NOTE]
 > This process happens entirely in your browser. No data is decrypted on external servers, ensuring your 3D models remain private.
@@ -97,8 +97,9 @@ Meshy.ai uses a proprietary `.meshy` format for its latest models. This extensio
 ## 🔐 Security & Privacy
 
 We take your data seriously.
-*   ✅ **100% Local**: No data is ever sent to external servers. Your token stays on your machine.
-*   ✅ **No Background Tracking**: The extension only activates when you open the popup.
+*   ✅ **Local credential handling**: The extension stores the session token locally and sends requests only to Meshy API domains.
+*   ✅ **No tracking service**: The extension does not send analytics or model data to a third-party service.
+*   ✅ **Explicit activation**: Model retrieval starts when you use the popup.
 *   ✅ **Transparent Code**: Being open-source, you can audit every line of code.
 
 ---

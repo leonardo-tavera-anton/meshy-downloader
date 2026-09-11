@@ -32,33 +32,24 @@ function extractTokenFromCookies() {
   return token;
 }
 
+function saveToken(token) {
+  if (typeof token !== 'string' || token.length < 20 || token.length > 4096) return;
+  chrome.runtime.sendMessage({ action: 'saveToken', token }).catch(() => {});
+}
+
 setTimeout(() => {
   const token = extractTokenFromCookies();
-  if (token) {
-    chrome.runtime.sendMessage({ action: 'saveToken', token: token });
-  }
+  if (token) saveToken(token);
 }, 1500);
 
-
-// ===== FETCH INTERCEPTION FOR BEARER TOKEN =====
-let tokenSaved = false;
-const originalFetch = window.fetch;
-
-window.fetch = function (...args) {
-  const request = args[0];
-  const options = args[1] || {};
-
-  if (typeof request === 'string' && request.includes('api.meshy.ai')) {
-    const authHeader = options.headers?.Authorization || options.headers?.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ') && !tokenSaved) {
-      const token = authHeader.replace('Bearer ', '');
-      chrome.runtime.sendMessage({ action: 'saveToken', token: token });
-      tokenSaved = true;
-      console.log('✓ TOKEN INTERCEPTED FROM FETCH');
-    }
+window.addEventListener('__meshy_token__', (event) => {
+  try {
+    const detail = JSON.parse(event.detail);
+    saveToken(detail.token);
+  } catch (error) {
+    console.warn('[Meshy DL] Invalid token bridge event');
   }
-  return originalFetch.apply(this, args);
-};
+});
 
 
 // ===== CONTENT SCRIPT: Auth Storage + Decrypt Worker =====
@@ -66,8 +57,9 @@ let wasmAuth = null;
 
 window.addEventListener('__meshy_auth__', (e) => {
   try {
-    wasmAuth = JSON.parse(e.detail);
-    console.log('✓ WASM auth credentials captured in content script');
+    const auth = JSON.parse(e.detail);
+    if (!auth.hostname || !auth.signature || !Number.isFinite(auth.timestamp)) return;
+    wasmAuth = auth;
     chrome.runtime.sendMessage({ action: 'saveWasmAuth', auth: wasmAuth });
   } catch (e) {
     console.error('Failed to parse WASM auth:', e);
@@ -89,7 +81,7 @@ function initDecryptWorker() {
     }
 
     if (!wasmAuth) {
-      reject(new Error('No WASM auth available yet.'));
+      reject(new Error('Aún no se capturan las credenciales WASM. Haz clic o interactúa con el modelo 3D en Meshy para generarlas.'));
       return;
     }
 
@@ -150,14 +142,14 @@ function ensureArrayBuffer(data) {
   return data;
 }
 
+function safeFilename(value, fallback = 'modelo') {
+  const normalized = String(value || fallback).replace(/[^a-zA-Z0-9._-]/g, '_');
+  return normalized.replace(/^\.+/, '').slice(0, 100) || fallback;
+}
+
 async function decryptAndDownload(modelInput, filename, requestId, targetFormat = 'glb') {
   try {
-    // Intentar inicializar el worker de forma no bloqueante
-    try {
-      await initDecryptWorker();
-    } catch (e) {
-      console.warn('[Meshy DL] Worker no disponible, intentando descarga directa:', e.message);
-    }
+    await initDecryptWorker();
 
     const parts = Array.isArray(modelInput) ? modelInput : [{ url: modelInput, filename: filename }];
 
@@ -166,7 +158,7 @@ async function decryptAndDownload(modelInput, filename, requestId, targetFormat 
       const currentUrl = part.url || part;
       
       const ext = targetFormat === 'obj' ? '.obj' : (targetFormat === 'stl' ? '.stl' : '.glb');
-      const baseName = (part.filename || filename).replace(/\.(glb|obj|stl|meshy)$/i, '');
+      const baseName = safeFilename((part.filename || filename).replace(/\.(glb|obj|stl|meshy)$/i, ''));
       const currentFilename = parts.length > 1 ? `${baseName}_parte_${i + 1}${ext}` : `${baseName}${ext}`;
 
       chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: `fetching (${i + 1}/${parts.length})` });
@@ -175,18 +167,13 @@ async function decryptAndDownload(modelInput, filename, requestId, targetFormat 
       if (!response.ok) throw new Error(`Fetch failed for part ${i + 1}: ${response.status}`);
       let rawBuffer = await response.arrayBuffer();
 
-      // Desencriptar solo si el worker está listo
       if (decryptWorker && workerReady) {
-        try {
-          chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: `decrypting (${i + 1}/${parts.length})` });
-          const id = ++opCounter;
-          rawBuffer = await new Promise((resolve, reject) => {
-            pendingOps[id] = { resolve, reject };
-            decryptWorker.postMessage({ id, type: 'process', data: rawBuffer }, [rawBuffer]);
-          });
-        } catch (decryptErr) {
-          console.warn('[Meshy DL] Falló la desencriptación del worker, usando buffer crudo:', decryptErr);
-        }
+        chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: `decrypting (${i + 1}/${parts.length})` });
+        const id = ++opCounter;
+        rawBuffer = await new Promise((resolve, reject) => {
+          pendingOps[id] = { resolve, reject };
+          decryptWorker.postMessage({ id, type: 'process', data: rawBuffer }, [rawBuffer]);
+        });
       }
 
       const glbData = ensureArrayBuffer(rawBuffer);
@@ -204,6 +191,12 @@ async function decryptAndDownload(modelInput, filename, requestId, targetFormat 
 // ===== CONVERSION & DOWNLOAD UTILS =====
 async function processAndSaveBlob(glbData, targetFormat, currentFilename) {
   const buffer = ensureArrayBuffer(glbData);
+  const view = new DataView(buffer);
+  
+  const magic = view.getUint32(0, true);
+  if (magic !== 0x46544C67) {
+    throw new Error('El archivo descargado sigue cifrado. Asegúrate de hacer clic en el modelo 3D en Meshy para generar las credenciales WASM.');
+  }
 
   try {
     const geometry = parseGLBGeometry(buffer);
@@ -223,34 +216,42 @@ async function processAndSaveBlob(glbData, targetFormat, currentFilename) {
 
     triggerDownload(finalBlob, currentFilename);
   } catch (e) {
-    console.error('[Meshy DL] Error al convertir geometría:', e);
-    alert('Error al convertir el formato 3D: ' + e.message);
+    console.error('[Meshy DL] Error al procesar geometría:', e);
+    throw e;
   }
 }
 
 function parseGLBGeometry(inputBuffer) {
   const arrayBuffer = ensureArrayBuffer(inputBuffer);
   const dataView = new DataView(arrayBuffer);
-  
+  if (arrayBuffer.byteLength < 20) throw new Error('El archivo GLB está incompleto.');
+
   const magic = dataView.getUint32(0, true);
-  if (magic !== 0x46544C67) throw new Error('El archivo no es un contenedor GLB válido.');
+  if (magic !== 0x46544C67) throw new Error('El archivo no es un GLB válido.');
+  const version = dataView.getUint32(4, true);
+  const declaredLength = dataView.getUint32(8, true);
+  if (version !== 2 || declaredLength > arrayBuffer.byteLength || declaredLength < 20) {
+    throw new Error('La cabecera GLB no es válida.');
+  }
 
   const jsonChunkLength = dataView.getUint32(12, true);
   const jsonChunkType = dataView.getUint32(16, true);
-  if (jsonChunkType !== 0x4E4F534A) throw new Error('Estructura GLB inválida.');
+  if (jsonChunkType !== 0x4E4F534A || 20 + jsonChunkLength > declaredLength) throw new Error('Estructura GLB inválida.');
 
   const decoder = new TextDecoder('utf-8');
   const jsonBytes = new Uint8Array(arrayBuffer, 20, jsonChunkLength);
   const gltf = JSON.parse(decoder.decode(jsonBytes));
 
   const binHeaderOffset = 20 + jsonChunkLength;
-  if (binHeaderOffset >= arrayBuffer.byteLength) throw new Error('Offset binario fuera de rango.');
+  if (binHeaderOffset + 8 > declaredLength) throw new Error('Offset binario fuera de rango.');
 
   const binChunkLength = dataView.getUint32(binHeaderOffset, true);
   const binChunkType = dataView.getUint32(binHeaderOffset + 4, true);
   if (binChunkType !== 0x004E4942) throw new Error('Bloque binario no encontrado.');
 
   const binBufferOffset = binHeaderOffset + 8;
+  const binBufferEnd = binBufferOffset + binChunkLength;
+  if (binBufferEnd > declaredLength || binBufferEnd > arrayBuffer.byteLength) throw new Error('Bloque binario fuera de rango.');
 
   let allPositions = [];
   let allIndices = [];
@@ -259,40 +260,42 @@ function parseGLBGeometry(inputBuffer) {
   for (const mesh of gltf.meshes || []) {
     for (const primitive of mesh.primitives || []) {
       if (primitive.attributes.POSITION === undefined) continue;
+      if (primitive.mode !== undefined && primitive.mode !== 4) continue;
 
       const posAccessor = gltf.accessors[primitive.attributes.POSITION];
-      const posBufferView = gltf.bufferViews[posAccessor.bufferView];
-      const posByteOffset = binBufferOffset + (posBufferView.byteOffset || 0) + (posAccessor.byteOffset || 0);
-      const posFloatCount = posAccessor.count * 3;
+      const posBufferView = posAccessor ? gltf.bufferViews[posAccessor.bufferView] : null;
+      if (!posAccessor || !posBufferView || posAccessor.type !== 'VEC3' || posAccessor.componentType !== 5126) {
+        throw new Error('El modelo contiene posiciones incompatibles.');
+      }
 
-      const positions = new Float32Array(arrayBuffer, posByteOffset, posFloatCount);
-
-      for (let i = 0; i < positions.length; i++) {
-        allPositions.push(positions[i]);
+      const posStride = posBufferView.byteStride || 12;
+      const posStart = binBufferOffset + (posBufferView.byteOffset || 0) + (posAccessor.byteOffset || 0);
+      const posEnd = posStart + (posAccessor.count - 1) * posStride + 12;
+      if (posStart < binBufferOffset || posEnd > binBufferEnd) throw new Error('Posiciones fuera de rango.');
+      for (let i = 0; i < posAccessor.count; i++) {
+        const offset = posStart + i * posStride;
+        allPositions.push(dataView.getFloat32(offset, true), dataView.getFloat32(offset + 4, true), dataView.getFloat32(offset + 8, true));
       }
 
       if (primitive.indices !== undefined) {
         const idxAccessor = gltf.accessors[primitive.indices];
-        const idxBufferView = gltf.bufferViews[idxAccessor.bufferView];
-        const idxByteOffset = binBufferOffset + (idxBufferView.byteOffset || 0) + (idxAccessor.byteOffset || 0);
-
-        if (idxAccessor.componentType === 5123) {
-          const indices = new Uint16Array(arrayBuffer, idxByteOffset, idxAccessor.count);
-          for (let i = 0; i < indices.length; i++) {
-            allIndices.push(indices[i] + vertexOffset);
-          }
-        } else if (idxAccessor.componentType === 5125) {
-          const indices = new Uint32Array(arrayBuffer, idxByteOffset, idxAccessor.count);
-          for (let i = 0; i < indices.length; i++) {
-            allIndices.push(indices[i] + vertexOffset);
-          }
-        } else if (idxAccessor.componentType === 5121) {
-          const indices = new Uint8Array(arrayBuffer, idxByteOffset, idxAccessor.count);
-          for (let i = 0; i < indices.length; i++) {
-            allIndices.push(indices[i] + vertexOffset);
-          }
+        const idxBufferView = idxAccessor ? gltf.bufferViews[idxAccessor.bufferView] : null;
+        if (!idxAccessor || !idxBufferView || ![5121, 5123, 5125].includes(idxAccessor.componentType)) throw new Error('Índices incompatibles.');
+        if (idxAccessor.count % 3 !== 0) throw new Error('El modelo contiene una cantidad de índices inválida.');
+        const componentSize = idxAccessor.componentType === 5125 ? 4 : (idxAccessor.componentType === 5123 ? 2 : 1);
+        const idxStride = idxBufferView.byteStride || componentSize;
+        const idxStart = binBufferOffset + (idxBufferView.byteOffset || 0) + (idxAccessor.byteOffset || 0);
+        const idxEnd = idxStart + (idxAccessor.count - 1) * idxStride + componentSize;
+        if (idxStart < binBufferOffset || idxEnd > binBufferEnd) throw new Error('Índices fuera de rango.');
+        for (let i = 0; i < idxAccessor.count; i++) {
+          const offset = idxStart + i * idxStride;
+          const index = idxAccessor.componentType === 5125 ? dataView.getUint32(offset, true)
+            : (idxAccessor.componentType === 5123 ? dataView.getUint16(offset, true) : dataView.getUint8(offset));
+          if (index >= posAccessor.count) throw new Error('Índice de vértice fuera de rango.');
+          allIndices.push(index + vertexOffset);
         }
       } else {
+        if (posAccessor.count % 3 !== 0) throw new Error('El modelo contiene una cantidad de vértices inválida.');
         for (let i = 0; i < posAccessor.count; i++) {
           allIndices.push(i + vertexOffset);
         }
@@ -314,7 +317,7 @@ function convertGeometryToOBJ(geometry) {
     output += `v ${pos[i]} ${pos[i + 1]} ${pos[i + 2]}\n`;
   }
 
-  for (let i = 0; i < idx.length; i += 3) {
+  for (let i = 0; i + 2 < idx.length; i += 3) {
     output += `f ${idx[i] + 1} ${idx[i + 1] + 1} ${idx[i + 2] + 1}\n`;
   }
 
@@ -324,7 +327,7 @@ function convertGeometryToOBJ(geometry) {
 function convertGeometryToSTL(geometry) {
   const pos = geometry.positions;
   const idx = geometry.indices;
-  const triangleCount = idx.length / 3;
+  const triangleCount = Math.floor(idx.length / 3);
 
   const bufferSize = 80 + 4 + triangleCount * 50;
   const buffer = new ArrayBuffer(bufferSize);
@@ -334,27 +337,23 @@ function convertGeometryToSTL(geometry) {
   view.setUint32(offset, triangleCount, true);
   offset += 4;
 
-  for (let i = 0; i < idx.length; i += 3) {
+  for (let i = 0; i + 2 < idx.length; i += 3) {
     const i1 = idx[i] * 3;
     const i2 = idx[i + 1] * 3;
     const i3 = idx[i + 2] * 3;
 
-    // Normal (0,0,0)
     view.setFloat32(offset, 0, true); offset += 4;
     view.setFloat32(offset, 0, true); offset += 4;
     view.setFloat32(offset, 0, true); offset += 4;
 
-    // Vertex 1
     view.setFloat32(offset, pos[i1], true); offset += 4;
     view.setFloat32(offset, pos[i1 + 1], true); offset += 4;
     view.setFloat32(offset, pos[i1 + 2], true); offset += 4;
 
-    // Vertex 2
     view.setFloat32(offset, pos[i2], true); offset += 4;
     view.setFloat32(offset, pos[i2 + 1], true); offset += 4;
     view.setFloat32(offset, pos[i2 + 2], true); offset += 4;
 
-    // Vertex 3
     view.setFloat32(offset, pos[i3], true); offset += 4;
     view.setFloat32(offset, pos[i3 + 1], true); offset += 4;
     view.setFloat32(offset, pos[i3 + 2], true); offset += 4;
@@ -377,13 +376,12 @@ function triggerDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
 }
 
-// Handle messages from background
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'decryptAndDownload') {
     console.log('[Meshy DL] Received decrypt request:', request.requestId);
     
     const payload = (request.parts && request.parts.length > 0) ? request.parts : request.modelUrl;
-    const targetFormat = request.targetFormat || 'obj';
+    const targetFormat = request.targetFormat || 'glb';
     
     decryptAndDownload(payload, request.filename, request.requestId, targetFormat);
     sendResponse({ success: true });

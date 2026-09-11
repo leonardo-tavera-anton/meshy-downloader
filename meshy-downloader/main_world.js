@@ -1,27 +1,45 @@
 // main_world.js — Runs in the page's MAIN world (not isolated)
-// Hooks Worker.postMessage to capture WASM auth credentials
+// Hooks page APIs to capture only the credentials required by the local decoder.
 
 (function () {
-    const _origPostMessage = Worker.prototype.postMessage;
+    const originalPostMessage = Worker.prototype.postMessage;
+
+    function publish(type, detail) {
+        window.dispatchEvent(new CustomEvent(type, {
+            detail: JSON.stringify(detail)
+        }));
+    }
 
     Worker.prototype.postMessage = function (msg, transfer) {
         try {
             if (msg && msg.type === 'authorize' && msg.hostname && msg.signature) {
-                // Send auth data to the content script via CustomEvent
-                window.dispatchEvent(new CustomEvent('__meshy_auth__', {
-                    detail: JSON.stringify({
-                        hostname: msg.hostname,
-                        timestamp: msg.timestamp,
-                        signature: msg.signature
-                    })
-                }));
-                console.log('[Meshy DL] ✓ WASM auth intercepted:', msg.hostname);
+                publish('__meshy_auth__', {
+                    hostname: String(msg.hostname),
+                    timestamp: Number(msg.timestamp),
+                    signature: String(msg.signature)
+                });
             }
         } catch (e) {
-            console.error('[Meshy DL] Hook error:', e);
+            // Keep the page's worker behavior intact if the bridge cannot inspect a message.
         }
-        return _origPostMessage.call(this, msg, transfer);
+        return originalPostMessage.call(this, msg, transfer);
     };
 
-    console.log('[Meshy DL] ✓ Worker.postMessage hook installed (MAIN world)');
+    const originalFetch = window.fetch;
+    window.fetch = function (...args) {
+        try {
+            const request = args[0];
+            const options = args[1] || {};
+            const url = typeof request === 'string' ? request : request?.url;
+            const headers = new Headers(options.headers || request?.headers);
+            const authorization = headers.get('Authorization');
+
+            if (url && url.includes('api.meshy.ai') && authorization?.startsWith('Bearer ')) {
+                publish('__meshy_token__', { token: authorization.slice(7) });
+            }
+        } catch (e) {
+            // Never interfere with the original request.
+        }
+        return originalFetch.apply(this, args);
+    };
 })();

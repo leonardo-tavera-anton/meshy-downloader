@@ -1,171 +1,193 @@
-// popup.js
+const loadTasksButton = document.getElementById('loadTasks');
+const statusDiv = document.getElementById('status');
+const tasksList = document.getElementById('tasksList');
+const formatSelect = document.getElementById('formatSelect');
 
-document.getElementById('loadTasks').addEventListener('click', loadTasks);
+loadTasksButton.addEventListener('click', loadTasks);
 
-// Listen for decrypt status updates from content script
 chrome.runtime.onMessage.addListener((request) => {
-  if (request.action === 'decryptStatus') {
-    const btn = document.querySelector(`.btn-download[data-id="${request.requestId}"]`);
-    if (!btn) return;
+  if (request.action !== 'decryptStatus') return;
 
-    if (request.status.startsWith('fetching')) {
-      btn.innerHTML = `<span class="download-icon">📥</span><span class="download-text">${request.status}</span>`;
-    } else if (request.status.startsWith('decrypting')) {
-      btn.innerHTML = `<span class="download-icon">🔓</span><span class="download-text">${request.status}</span>`;
-    } else if (request.status === 'done') {
-      btn.innerHTML = '<span class="download-icon">✅</span><span class="download-text">Done!</span>';
-    } else if (request.status === 'error') {
-      btn.innerHTML = '<span class="download-icon">❌</span><span class="download-text">Error</span>';
-      btn.title = request.error;
-      btn.disabled = false;
-    }
+  const button = document.querySelector(`[data-id="${CSS.escape(String(request.requestId))}"]`);
+  if (!button) return;
+
+  if (request.status.startsWith('fetching')) {
+    setButtonState(button, '📥', request.status);
+  } else if (request.status.startsWith('decrypting')) {
+    setButtonState(button, '🔓', request.status);
+  } else if (request.status === 'done') {
+    setButtonState(button, '✅', 'Completado');
+  } else if (request.status === 'error') {
+    setButtonState(button, '❌', 'Error');
+    button.title = request.error || 'La descarga falló';
+    button.disabled = false;
   }
 });
 
-async function loadTasks() {
-  const statusDiv = document.getElementById('status');
-  const tasksList = document.getElementById('tasksList');
+function setStatus(icon, message, state = '') {
+  statusDiv.replaceChildren();
+  const iconElement = document.createElement('span');
+  iconElement.className = 'status-icon';
+  iconElement.textContent = icon;
+  iconElement.setAttribute('aria-hidden', 'true');
+  const textElement = document.createElement('span');
+  textElement.className = 'status-text';
+  textElement.textContent = message;
+  statusDiv.append(iconElement, textElement);
+  statusDiv.className = `status-box ${state}`.trim();
+}
 
-  statusDiv.innerHTML = '<span class="status-icon">⏳</span><span class="status-text">Fetching your models...</span>';
-  statusDiv.classList.add('loading');
-  tasksList.innerHTML = '';
+function setButtonState(button, icon, text) {
+  const iconElement = button.querySelector('.download-icon');
+  const textElement = button.querySelector('.download-text');
+  if (iconElement) iconElement.textContent = icon;
+  if (textElement) textElement.textContent = text;
+}
 
-  chrome.runtime.sendMessage({ action: 'getTasks' }, async (response) => {
-    statusDiv.classList.remove('loading');
-
-    if (response && response.success && response.tasks.length > 0) {
-      statusDiv.innerHTML = `<span class="status-icon">✓</span><span class="status-text">${response.tasks.length} model(s) found</span>`;
-      statusDiv.classList.add('success');
-
-      displayTasks(response.tasks, tasksList);
-
-    } else {
-      statusDiv.innerHTML = `<span class="status-icon">❌</span><span class="status-text">${(response && response.error) || 'No models found'}</span>`;
-      statusDiv.classList.add('error');
-    }
+function sendMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(response);
+    });
   });
 }
 
-function displayTasks(tasks, tasksList) {
-  // Obtener el formato seleccionado globalmente en el select superior
-  const formatSelect = document.getElementById('formatSelect');
-  const currentFormat = formatSelect ? formatSelect.value.toUpperCase() : 'GLB';
+async function loadTasks() {
+  loadTasksButton.disabled = true;
+  setStatus('⏳', 'Cargando tus modelos...', 'loading');
+  tasksList.replaceChildren();
+
+  try {
+    const response = await sendMessage({ action: 'getTasks' });
+    if (!response?.success) throw new Error(response?.error || 'No se encontraron modelos.');
+
+    setStatus('✓', `${response.tasks.length} modelo(s) encontrado(s)`, 'success');
+    displayTasks(response.tasks);
+  } catch (error) {
+    setStatus('❌', error.message || 'No se pudieron cargar los modelos.', 'error');
+  } finally {
+    loadTasksButton.disabled = false;
+  }
+}
+
+function createElement(tag, className, text) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text !== undefined) element.textContent = text;
+  return element;
+}
+
+function createIcon(text) {
+  const icon = createElement('span', 'download-icon', text);
+  icon.setAttribute('aria-hidden', 'true');
+  return icon;
+}
+
+function isSafeImageUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && ['api.meshy.ai', 'assets.meshy.ai'].includes(url.hostname);
+  } catch (error) {
+    return false;
+  }
+}
+
+function displayTasks(tasks) {
+  tasksList.replaceChildren();
 
   tasks.forEach((task) => {
-    const taskEl = document.createElement('div');
-    taskEl.className = 'task-card';
+    const card = createElement('article', 'task-card');
+    const header = createElement('div', 'task-header');
 
-    const date = new Date(task.createdAt).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric'
-    });
+    if (isSafeImageUrl(task.imageUrl)) {
+      const image = createElement('img', 'task-image');
+      image.src = task.imageUrl;
+      image.alt = 'Vista previa del modelo';
+      image.loading = 'lazy';
+      header.appendChild(image);
+    }
 
-    const statusClass = task.status.toLowerCase();
+    const headerContent = createElement('div', 'task-header-content');
+    const title = task.prompt && task.prompt.length < 25 ? task.prompt : (task.title || 'Modelo 3D');
+    headerContent.appendChild(createElement('h2', 'task-title', title));
+    headerContent.appendChild(createElement('span', `status-badge ${String(task.status || '').toLowerCase()}`, task.status || 'Desconocido'));
+    header.appendChild(headerContent);
+    card.appendChild(header);
 
-    const imageDisplay = task.imageUrl ? `<img src="${task.imageUrl}" alt="Preview" class="task-image" />` : '';
+    const meta = createElement('div', 'task-meta');
+    if (task.faceCount || task.vertexCount || task.triangleCount) {
+      const values = [
+        task.faceCount ? `${Number(task.faceCount).toLocaleString('es-ES')} caras` : '',
+        task.vertexCount ? `${Number(task.vertexCount).toLocaleString('es-ES')} vértices` : ''
+      ].filter(Boolean).join(', ');
+      addMeta(meta, 'Polígonos:', values);
+    }
+    addMeta(meta, 'ID:', `${String(task.id).slice(0, 12)}...`);
+    const date = task.createdAt ? new Date(task.createdAt).toLocaleDateString('es-ES', { year: 'numeric', month: 'short', day: 'numeric' }) : 'Sin fecha';
+    addMeta(meta, 'Fecha:', date);
+    card.appendChild(meta);
 
-    const displayTitle = (task.prompt && task.prompt.length < 25)
-      ? task.prompt
-      : (task.title || 'Untitled Model');
-    const formatNumber = (num) => num ? num.toLocaleString('en-US') : '';
+    const actions = createElement('div', 'task-actions');
+    const modelButton = createElement('button', 'btn-download');
+    modelButton.type = 'button';
+    modelButton.dataset.id = String(task.id);
+    modelButton.append(createIcon('⬇️'), createElement('span', 'download-text', task.parts?.length ? `Descargar partes (${task.parts.length})` : `Descargar ${formatSelect.value.toUpperCase()}`));
+    modelButton.addEventListener('click', () => downloadModel(task, modelButton));
+    actions.appendChild(modelButton);
 
-    const polyInfo = (task.faceCount || task.vertexCount || task.triangleCount)
-      ? `<div class="meta-item">
-          <span class="meta-label">Polygons:</span>
-          <span class="meta-value">${task.faceCount ? formatNumber(task.faceCount) + ' faces' : ''}${task.faceCount && task.vertexCount ? ', ' : ''}${task.vertexCount ? formatNumber(task.vertexCount) + ' vertices' : ''}</span>
-        </div>`
-      : '';
-
-    const downloadLabel = (task.parts && task.parts.length > 0) 
-      ? `Download Parts (${task.parts.length})` 
-      : `Download ${currentFormat}`;
-      
-    const downloadFilename = `meshy_${task.id}`;
-
-    const hasParts = task.parts && task.parts.length > 0;
-    const partsAttr = hasParts ? `data-parts='${JSON.stringify(task.parts)}'` : '';
-
-    const textureCount = task.textures ? Object.values(task.textures).filter(u => u).length : 0;
-    const hasTextures = textureCount > 0;
-
-    taskEl.innerHTML = `
-      <div class="task-header">
-        ${imageDisplay}
-        <div class="task-header-content">
-          <div class="task-title">${displayTitle}</div>
-          <span class="status-badge ${statusClass}">${task.status}</span>
-        </div>
-      </div>
-      <div class="task-meta">
-        ${polyInfo}
-        <div class="meta-item">
-          <span class="meta-label">ID:</span>
-          <span class="meta-value">${task.id.substring(0, 12)}...</span>
-        </div>
-        <div class="meta-item">
-          <span class="meta-label">Date:</span>
-          <span class="meta-value">${date}</span>
-        </div>
-      </div>
-      <div class="task-actions">
-        <button class="btn-download" data-id="${task.id}" data-url="${task.modelUrl}" data-filename="${downloadFilename}" ${partsAttr}>
-          <span class="download-icon">⬇️</span>
-          <span class="download-text">${downloadLabel}</span>
-        </button>
-        ${hasTextures ? `<button class="btn-download-texture" data-id="${task.id}" data-textures='${JSON.stringify(task.textures)}' data-taskname="${displayTitle}">
-          <span class="download-icon">🖼️</span>
-          <span class="download-text">Download Textures (${textureCount})</span>
-        </button>` : ''}
-      </div>
-    `;
-
-    tasksList.appendChild(taskEl);
+    const textureUrls = Object.values(task.textures || {}).filter(Boolean);
+    if (textureUrls.length) {
+      const textureButton = createElement('button', 'btn-download-texture');
+      textureButton.type = 'button';
+      textureButton.append(createIcon('🖼️'), createElement('span', 'download-text', `Descargar texturas (${textureUrls.length})`));
+      textureButton.addEventListener('click', () => downloadTextures(task, textureButton));
+      actions.appendChild(textureButton);
+    }
+    card.appendChild(actions);
+    tasksList.appendChild(card);
   });
+}
 
-  // Download model buttons
-  document.querySelectorAll('.btn-download').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const taskId = btn.dataset.id;
-      const modelUrl = btn.dataset.url;
-      const filename = btn.dataset.filename;
-      const partsStr = btn.dataset.parts;
-      const parts = partsStr ? JSON.parse(partsStr) : null;
+function addMeta(parent, label, value) {
+  const item = createElement('div', 'meta-item');
+  item.append(createElement('span', 'meta-label', label), createElement('span', 'meta-value', value));
+  parent.appendChild(item);
+}
 
-      // LEE EL FORMATO SELECCIONADO AL MOMENTO DE DAR CLIC
-      const formatSelect = document.getElementById('formatSelect');
-      const targetFormat = formatSelect ? formatSelect.value : 'glb';
-
-      chrome.runtime.sendMessage({
-        action: 'downloadModel',
-        taskId: taskId,
-        modelUrl: modelUrl,
-        filename: filename,
-        parts: parts,
-        targetFormat: targetFormat // <--- ENVÍA EL FORMATO AL BACKGROUND
-      });
-
-      btn.innerHTML = '<span class="download-icon">⏳</span><span class="download-text">Starting...</span>';
-      btn.disabled = true;
+async function downloadModel(task, button) {
+  setButtonState(button, '⏳', 'Iniciando...');
+  button.disabled = true;
+  try {
+    const response = await sendMessage({
+      action: 'downloadModel',
+      taskId: task.id,
+      modelUrl: task.modelUrl,
+      filename: `meshy_${task.id}`,
+      parts: task.parts?.length ? task.parts : null,
+      targetFormat: formatSelect.value
     });
-  });
+    if (!response?.success) throw new Error(response?.error || 'No se pudo iniciar la descarga.');
+  } catch (error) {
+    setButtonState(button, '❌', 'Error');
+    button.title = error.message;
+    button.disabled = false;
+  }
+}
 
-  // Download all textures buttons
-  document.querySelectorAll('.btn-download-texture').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const taskId = btn.dataset.id;
-      const textures = JSON.parse(btn.dataset.textures);
-      const taskName = btn.dataset.taskname;
-
-      chrome.runtime.sendMessage({
-        action: 'downloadAllTextures',
-        taskId: taskId,
-        textures: textures,
-        taskName: taskName
-      });
-
-      btn.innerHTML = '<span class="download-icon">✓</span><span class="download-text">Downloading...</span>';
-      btn.disabled = true;
-    });
-  });
+async function downloadTextures(task, button) {
+  setButtonState(button, '⏳', 'Descargando...');
+  button.disabled = true;
+  try {
+    const response = await sendMessage({ action: 'downloadAllTextures', taskId: task.id, textures: task.textures, taskName: task.title });
+    if (!response?.success) throw new Error(response?.error || 'No se pudieron descargar las texturas.');
+    setButtonState(button, '✅', 'Completado');
+  } catch (error) {
+    setButtonState(button, '❌', 'Error');
+    button.title = error.message;
+    button.disabled = false;
+  }
 }

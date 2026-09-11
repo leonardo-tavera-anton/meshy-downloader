@@ -42,14 +42,11 @@
   --shadow-glow: 0 0 40px var(--accent-glow);
 }
 
-/* Google Font Import */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-
 body {
   width: 420px;
   min-height: 500px;
   max-height: 600px;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: 'Segoe UI', system-ui, sans-serif;
   background: var(--bg-primary);
   color: var(--text-primary);
   line-height: 1.5;
@@ -611,4 +608,49 @@ body {
   opacity: 1;
   visibility: visible;
   transform: translateX(-50%) translateY(-4px);
+}
+
+.format-selector {
+  margin: 12px 20px;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+}
+
+.format-selector label {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.format-selector select {
+  min-width: 124px;
+  padding: 5px 8px;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+button:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent-tertiary);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--popup.html-->
-<html lang="en">
+<html lang="es">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -11,7 +11,7 @@
   <div class="container">
     <div class="header">
       <div class="header-content">
-        <div class="logo">🎨</div>
+        <div class="logo" aria-hidden="true">🎨</div>
         <div class="header-text">
           <h1 class="title">Meshy Downloader</h1>
           <p class="subtitle">Download 3D models effortlessly</p>
@@ -20,22 +20,22 @@
     </div>
 
     <!-- Selector de Formato Integrado -->
-    <div class="format-selector" style="margin: 12px 0; display: flex; align-items: center; justify-content: space-between; background: #252538; padding: 8px 12px; border-radius: 6px; border: 1px solid #3a3a52;">
-      <label for="formatSelect" style="color: #ccc; font-size: 13px; font-weight: 500;">Formato de salida:</label>
-      <select id="formatSelect" style="background: #1e1e2f; color: #fff; border: 1px solid #444; padding: 4px 8px; border-radius: 4px; outline: none; cursor: pointer;">
+    <div class="format-selector">
+      <label for="formatSelect">Formato de salida:</label>
+      <select id="formatSelect">
         <option value="glb" selected>GLB (Original)</option>
         <option value="obj">OBJ (.obj)</option>
         <option value="stl">STL (.stl - 3D Print)</option>
       </select>
     </div>
 
-    <div class="status-box" id="status">
+    <div class="status-box" id="status" role="status" aria-live="polite">
       <span class="status-icon">⚡</span>
       <span class="status-text">Ready to fetch your models</span>
     </div>
 
     <button id="loadTasks" class="btn-primary">
-      <span class="btn-icon">📥</span>
+      <span class="btn-icon" aria-hidden="true">📥</span>
       <span class="btn-text">Fetch Models</span>
     </button>
 
@@ -44,7 +44,7 @@
     </div>
 
     <div class="footer">
-      <p class="footer-text">💡 Make sure you're signed into <strong>meshy.ai</strong> for automatic token detection</p>
+      <p class="footer-text"><span aria-hidden="true">💡</span> Inicia sesión en <strong>meshy.ai</strong> para detectar tu sesión automáticamente.</p>
     </div>
   </div>
 
