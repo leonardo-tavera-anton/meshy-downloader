@@ -23,7 +23,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'downloadModel') {
-    downloadModel(request.taskId, request.modelUrl, request.filename, request.parts);
+    downloadModel(request.taskId, request.modelUrl, request.filename, request.parts, request.targetFormat);
   }
 
   if (request.action === 'downloadTexture') {
@@ -161,28 +161,37 @@ function mapTask(task, rootTask) {
   };
 }
 
-async function downloadModel(taskId, modelUrl, filename, parts) {
+async function downloadModel(taskId, modelUrl, filename, parts, targetFormat = 'glb') {
   const hasParts = parts && Array.isArray(parts) && parts.length > 0;
   
-  if (hasParts || (modelUrl && modelUrl.includes('.meshy'))) {
+  // Enrutar al content script si hay partes, archivo .meshy o si el usuario eligió convertir a OBJ/STL
+  if (hasParts || (modelUrl && modelUrl.includes('.meshy')) || targetFormat !== 'glb') {
     const tabs = await chrome.tabs.query({ url: ['https://meshy.ai/*', 'https://www.meshy.ai/*'] });
     if (tabs.length === 0) {
-      console.error('No meshy.ai tab found for decryption');
+      console.error('No meshy.ai tab found for download/conversion');
       return;
     }
 
-    const glbFilename = filename ? filename.replace('.meshy', '.glb') : 'modelo.glb';
+    const ext = targetFormat === 'obj' ? '.obj' : (targetFormat === 'stl' ? '.stl' : '.glb');
+    const baseFilename = filename ? filename.replace(/\.(meshy|glb|obj|stl)$/i, '') : 'modelo';
+    const outFilename = `${baseFilename}${ext}`;
+
     chrome.tabs.sendMessage(tabs[0].id, {
       action: 'decryptAndDownload',
       modelUrl: modelUrl,
       parts: hasParts ? parts : null,
-      filename: glbFilename,
+      filename: outFilename,
+      targetFormat: targetFormat,
       requestId: taskId
     });
   } else if (modelUrl) {
+    const ext = targetFormat === 'obj' ? '.obj' : (targetFormat === 'stl' ? '.stl' : '.glb');
+    const baseFilename = filename ? filename.replace(/\.(meshy|glb|obj|stl)$/i, '') : 'modelo';
+    const outFilename = `${baseFilename}${ext}`;
+
     chrome.downloads.download({
       url: modelUrl,
-      filename: `meshy_models/${filename}`,
+      filename: `meshy_models/${outFilename}`,
       saveAs: true
     });
   }

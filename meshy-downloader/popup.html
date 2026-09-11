@@ -6,6 +6,14 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+<div class="format-selector" style="margin: 10px 0; display: flex; align-items: center; justify-content: space-between;">
+  <label for="formatSelect" style="color: #ccc; font-size: 13px;">Formato de salida:</label>
+  <select id="formatSelect" style="background: #2a2a3c; color: #fff; border: 1px solid #444; padding: 4px 8px; border-radius: 4px;">
+    <option value="glb" selected>GLB (Original)</option>
+    <option value="obj">OBJ (.obj)</option>
+    <option value="stl">STL (.stl - 3D Print)</option>
+  </select>
+</div>
   <div class="container">
     <div class="header">
       <div class="header-content">
