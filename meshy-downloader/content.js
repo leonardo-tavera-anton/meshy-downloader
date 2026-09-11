@@ -142,6 +142,25 @@ function ensureArrayBuffer(data) {
   return data;
 }
 
+function isGlbBuffer(data) {
+  const buffer = ensureArrayBuffer(data);
+  return buffer instanceof ArrayBuffer && buffer.byteLength >= 4
+    && new DataView(buffer).getUint32(0, true) === 0x46544C67;
+}
+
+async function fetchModelBuffer(url) {
+  const stored = await chrome.storage.local.get('meshy_token');
+  const headers = {};
+  if (stored.meshy_token) headers.Authorization = `Bearer ${stored.meshy_token}`;
+
+  const response = await fetch(url, {
+    credentials: 'include',
+    headers
+  });
+  if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
+  return response.arrayBuffer();
+}
+
 function safeFilename(value, fallback = 'modelo') {
   const normalized = String(value || fallback).replace(/[^a-zA-Z0-9._-]/g, '_');
   return normalized.replace(/^\.+/, '').slice(0, 100) || fallback;
@@ -163,11 +182,11 @@ async function decryptAndDownload(modelInput, filename, requestId, targetFormat 
 
       chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: `fetching (${i + 1}/${parts.length})` });
 
-      const response = await fetch(currentUrl);
-      if (!response.ok) throw new Error(`Fetch failed for part ${i + 1}: ${response.status}`);
-      let rawBuffer = await response.arrayBuffer();
+      let rawBuffer = await fetchModelBuffer(currentUrl);
 
-      if (decryptWorker && workerReady) {
+      // Some Meshy tasks already provide a GLB. Sending it through the
+      // proprietary decoder can turn a valid file into an invalid payload.
+      if (!isGlbBuffer(rawBuffer) && decryptWorker && workerReady) {
         chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: `decrypting (${i + 1}/${parts.length})` });
         const id = ++opCounter;
         rawBuffer = await new Promise((resolve, reject) => {
