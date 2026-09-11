@@ -1,10 +1,8 @@
 // content.js
 
 // ===== TOKEN EXTRACTION FROM COOKIES =====
-
 function extractTokenFromCookies() {
   let token = null;
-
   try {
     const cookies = document.cookie.split(';');
     let authTokenPart0 = null;
@@ -13,39 +11,24 @@ function extractTokenFromCookies() {
     for (let cookie of cookies) {
       const [name, value] = cookie.split('=');
       const trimmedName = name.trim();
-
-      if (trimmedName === 'sb-auth-auth-token.0') {
-        authTokenPart0 = value.trim();
-      }
-      if (trimmedName === 'sb-auth-auth-token.1') {
-        authTokenPart1 = value.trim();
-      }
+      if (trimmedName === 'sb-auth-auth-token.0') authTokenPart0 = value.trim();
+      if (trimmedName === 'sb-auth-auth-token.1') authTokenPart1 = value.trim();
     }
 
     if (authTokenPart0 && authTokenPart1) {
       let part0 = authTokenPart0;
-      if (part0.startsWith('base64-')) {
-        part0 = part0.substring(7);
-      }
-
+      if (part0.startsWith('base64-')) part0 = part0.substring(7);
       const combined = part0 + authTokenPart1;
-
       try {
         const decoded = atob(combined);
         const parsed = JSON.parse(decoded);
-
         if (parsed.access_token) {
           token = parsed.access_token;
           console.log('✓ TOKEN FOUND FROM COOKIES');
         }
-      } catch (e) {
-        console.error('❌ Decode error:', e.message);
-      }
+      } catch (e) {}
     }
-  } catch (e) {
-    console.error('❌ Cookie error:', e.message);
-  }
-
+  } catch (e) {}
   return token;
 }
 
@@ -58,7 +41,6 @@ setTimeout(() => {
 
 
 // ===== FETCH INTERCEPTION FOR BEARER TOKEN =====
-
 let tokenSaved = false;
 const originalFetch = window.fetch;
 
@@ -68,7 +50,6 @@ window.fetch = function (...args) {
 
   if (typeof request === 'string' && request.includes('api.meshy.ai')) {
     const authHeader = options.headers?.Authorization || options.headers?.authorization;
-
     if (authHeader && authHeader.startsWith('Bearer ') && !tokenSaved) {
       const token = authHeader.replace('Bearer ', '');
       chrome.runtime.sendMessage({ action: 'saveToken', token: token });
@@ -76,16 +57,13 @@ window.fetch = function (...args) {
       console.log('✓ TOKEN INTERCEPTED FROM FETCH');
     }
   }
-
   return originalFetch.apply(this, args);
 };
 
 
 // ===== CONTENT SCRIPT: Auth Storage + Decrypt Worker =====
-
 let wasmAuth = null;
 
-// Listen for auth from main world
 window.addEventListener('__meshy_auth__', (e) => {
   try {
     wasmAuth = JSON.parse(e.detail);
@@ -98,7 +76,6 @@ window.addEventListener('__meshy_auth__', (e) => {
 
 
 // ===== DECRYPT WORKER (runs in content script context) =====
-
 let decryptWorker = null;
 let workerReady = false;
 let pendingOps = {};
@@ -112,27 +89,22 @@ function initDecryptWorker() {
     }
 
     if (!wasmAuth) {
-      reject(new Error('No WASM auth. View a 3D model on meshy.ai first.'));
+      reject(new Error('No WASM auth available yet.'));
       return;
     }
 
     const workerUrl = window.location.origin + '/resource/decrypt/loader-worker.js';
-    console.log('[Meshy DL] Creating Worker from:', workerUrl);
 
     try {
       decryptWorker = new Worker(workerUrl);
     } catch (e) {
-      console.error('[Meshy DL] Worker creation failed:', e);
       reject(new Error('Worker creation failed: ' + e.message));
       return;
     }
 
     decryptWorker.onmessage = (e) => {
       const msg = e.data;
-      console.log('[Meshy DL] Worker message:', msg.type);
-
       if (msg.type === 'loaded') {
-        console.log('[Meshy DL] WASM loaded, authorizing...');
         decryptWorker.postMessage({
           type: 'authorize',
           hostname: wasmAuth.hostname,
@@ -143,12 +115,8 @@ function initDecryptWorker() {
         console.log('[Meshy DL] ✓ Worker authorized and ready');
         workerReady = true;
         resolve();
-      } else if (msg.type === 'auth_error') {
-        console.error('[Meshy DL] Auth error:', msg.error);
-        reject(new Error('WASM auth failed: ' + msg.error));
-      } else if (msg.type === 'error') {
-        console.error('[Meshy DL] Worker error:', msg.error);
-        reject(new Error('Worker error: ' + msg.error));
+      } else if (msg.type === 'auth_error' || msg.type === 'error') {
+        reject(new Error('Worker error: ' + (msg.error || 'auth failed')));
       } else if (msg.type === 'process') {
         const op = pendingOps[msg.id];
         if (op) {
@@ -167,16 +135,29 @@ function initDecryptWorker() {
       }
     };
 
-    decryptWorker.onerror = (e) => {
-      console.error('[Meshy DL] Worker error event:', e);
-      reject(new Error('Worker load failed'));
-    };
+    decryptWorker.onerror = () => reject(new Error('Worker load failed'));
   });
+}
+
+function ensureArrayBuffer(data) {
+  if (data instanceof ArrayBuffer) return data;
+  if (data instanceof Uint8Array) {
+    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  }
+  if (data && data.buffer instanceof ArrayBuffer) {
+    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  }
+  return data;
 }
 
 async function decryptAndDownload(modelInput, filename, requestId, targetFormat = 'glb') {
   try {
-    await initDecryptWorker();
+    // Intentar inicializar el worker de forma no bloqueante
+    try {
+      await initDecryptWorker();
+    } catch (e) {
+      console.warn('[Meshy DL] Worker no disponible, intentando descarga directa:', e.message);
+    }
 
     const parts = Array.isArray(modelInput) ? modelInput : [{ url: modelInput, filename: filename }];
 
@@ -189,49 +170,46 @@ async function decryptAndDownload(modelInput, filename, requestId, targetFormat 
       const currentFilename = parts.length > 1 ? `${baseName}_parte_${i + 1}${ext}` : `${baseName}${ext}`;
 
       chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: `fetching (${i + 1}/${parts.length})` });
-      console.log(`[Meshy DL] Fetching part ${i + 1}/${parts.length}:`, currentUrl);
 
       const response = await fetch(currentUrl);
       if (!response.ok) throw new Error(`Fetch failed for part ${i + 1}: ${response.status}`);
-      const meshyData = await response.arrayBuffer();
+      let rawBuffer = await response.arrayBuffer();
 
-      chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: `decrypting (${i + 1}/${parts.length})` });
-      console.log(`[Meshy DL] Decrypting part ${i + 1}...`);
+      // Desencriptar solo si el worker está listo
+      if (decryptWorker && workerReady) {
+        try {
+          chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: `decrypting (${i + 1}/${parts.length})` });
+          const id = ++opCounter;
+          rawBuffer = await new Promise((resolve, reject) => {
+            pendingOps[id] = { resolve, reject };
+            decryptWorker.postMessage({ id, type: 'process', data: rawBuffer }, [rawBuffer]);
+          });
+        } catch (decryptErr) {
+          console.warn('[Meshy DL] Falló la desencriptación del worker, usando buffer crudo:', decryptErr);
+        }
+      }
 
-      const id = ++opCounter;
-      const glbData = await new Promise((resolve, reject) => {
-        pendingOps[id] = { resolve, reject };
-        decryptWorker.postMessage({ id, type: 'process', data: meshyData }, [meshyData]);
-      });
-
-      // Procesar y convertir a GLB, OBJ o STL de forma nativa sin Three.js
+      const glbData = ensureArrayBuffer(rawBuffer);
       await processAndSaveBlob(glbData, targetFormat, currentFilename);
-      console.log(`[Meshy DL] ✓ Downloaded part:`, currentFilename);
     }
 
     chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: 'done' });
   } catch (err) {
-    console.error('[Meshy DL] Decrypt failed:', err);
+    console.error('[Meshy DL] Error general:', err);
     chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: 'error', error: err.message });
+    alert('Error al descargar: ' + err.message);
   }
 }
 
-// ===== CONVERSION & DOWNLOAD UTILS (NATIVO / SIN THREE.JS) =====
-
+// ===== CONVERSION & DOWNLOAD UTILS =====
 async function processAndSaveBlob(glbData, targetFormat, currentFilename) {
-  if (targetFormat === 'glb') {
-    const blob = new Blob([glbData], { type: 'model/gltf-binary' });
-    triggerDownload(blob, currentFilename);
-    return;
-  }
+  const buffer = ensureArrayBuffer(glbData);
 
   try {
-    const geometry = parseGLBGeometry(glbData);
+    const geometry = parseGLBGeometry(buffer);
 
     if (!geometry || geometry.positions.length === 0) {
-      console.warn('No se pudieron extraer vértices del GLB. Descargando GLB original.');
-      triggerDownload(new Blob([glbData], { type: 'model/gltf-binary' }), currentFilename);
-      return;
+      throw new Error('No se pudieron extraer vértices del modelo.');
     }
 
     let finalBlob;
@@ -240,20 +218,22 @@ async function processAndSaveBlob(glbData, targetFormat, currentFilename) {
     } else if (targetFormat === 'stl') {
       finalBlob = convertGeometryToSTL(geometry);
     } else {
-      finalBlob = new Blob([glbData], { type: 'model/gltf-binary' });
+      finalBlob = new Blob([buffer], { type: 'model/gltf-binary' });
     }
 
     triggerDownload(finalBlob, currentFilename);
   } catch (e) {
-    console.error('Error al convertir formato:', e);
-    triggerDownload(new Blob([glbData], { type: 'model/gltf-binary' }), currentFilename);
+    console.error('[Meshy DL] Error al convertir geometría:', e);
+    alert('Error al convertir el formato 3D: ' + e.message);
   }
 }
 
-function parseGLBGeometry(arrayBuffer) {
+function parseGLBGeometry(inputBuffer) {
+  const arrayBuffer = ensureArrayBuffer(inputBuffer);
   const dataView = new DataView(arrayBuffer);
+  
   const magic = dataView.getUint32(0, true);
-  if (magic !== 0x46544C67) throw new Error('El archivo no es un GLB válido.');
+  if (magic !== 0x46544C67) throw new Error('El archivo no es un contenedor GLB válido.');
 
   const jsonChunkLength = dataView.getUint32(12, true);
   const jsonChunkType = dataView.getUint32(16, true);
@@ -264,6 +244,8 @@ function parseGLBGeometry(arrayBuffer) {
   const gltf = JSON.parse(decoder.decode(jsonBytes));
 
   const binHeaderOffset = 20 + jsonChunkLength;
+  if (binHeaderOffset >= arrayBuffer.byteLength) throw new Error('Offset binario fuera de rango.');
+
   const binChunkLength = dataView.getUint32(binHeaderOffset, true);
   const binChunkType = dataView.getUint32(binHeaderOffset + 4, true);
   if (binChunkType !== 0x004E4942) throw new Error('Bloque binario no encontrado.');
@@ -336,7 +318,7 @@ function convertGeometryToOBJ(geometry) {
     output += `f ${idx[i] + 1} ${idx[i + 1] + 1} ${idx[i + 2] + 1}\n`;
   }
 
-  return new Blob([output], { type: 'text/plain' });
+  return new Blob([output], { type: 'text/plain;charset=utf-8' });
 }
 
 function convertGeometryToSTL(geometry) {
@@ -344,32 +326,35 @@ function convertGeometryToSTL(geometry) {
   const idx = geometry.indices;
   const triangleCount = idx.length / 3;
 
-  const bufferSize = 84 + triangleCount * 50;
+  const bufferSize = 80 + 4 + triangleCount * 50;
   const buffer = new ArrayBuffer(bufferSize);
   const view = new DataView(buffer);
 
-  for (let i = 0; i < 80; i++) view.setUint8(i, 32);
-  view.setUint32(80, triangleCount, true);
-
-  let offset = 84;
+  let offset = 80;
+  view.setUint32(offset, triangleCount, true);
+  offset += 4;
 
   for (let i = 0; i < idx.length; i += 3) {
     const i1 = idx[i] * 3;
     const i2 = idx[i + 1] * 3;
     const i3 = idx[i + 2] * 3;
 
+    // Normal (0,0,0)
     view.setFloat32(offset, 0, true); offset += 4;
     view.setFloat32(offset, 0, true); offset += 4;
     view.setFloat32(offset, 0, true); offset += 4;
 
+    // Vertex 1
     view.setFloat32(offset, pos[i1], true); offset += 4;
     view.setFloat32(offset, pos[i1 + 1], true); offset += 4;
     view.setFloat32(offset, pos[i1 + 2], true); offset += 4;
 
+    // Vertex 2
     view.setFloat32(offset, pos[i2], true); offset += 4;
     view.setFloat32(offset, pos[i2 + 1], true); offset += 4;
     view.setFloat32(offset, pos[i2 + 2], true); offset += 4;
 
+    // Vertex 3
     view.setFloat32(offset, pos[i3], true); offset += 4;
     view.setFloat32(offset, pos[i3 + 1], true); offset += 4;
     view.setFloat32(offset, pos[i3 + 2], true); offset += 4;
@@ -398,7 +383,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log('[Meshy DL] Received decrypt request:', request.requestId);
     
     const payload = (request.parts && request.parts.length > 0) ? request.parts : request.modelUrl;
-    const targetFormat = request.targetFormat || 'glb';
+    const targetFormat = request.targetFormat || 'obj';
     
     decryptAndDownload(payload, request.filename, request.requestId, targetFormat);
     sendResponse({ success: true });

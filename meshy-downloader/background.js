@@ -1,6 +1,7 @@
 // background.js
 
 let wasmAuth = null;
+let tasksCache = [];
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'saveToken') {
@@ -9,14 +10,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'saveWasmAuth') {
     wasmAuth = request.auth;
-    console.log('✓ WASM auth credentials stored');
+    console.log('✓ WASM auth credentials stored in background');
   }
 
   if (request.action === 'getTasks') {
     getTasks().then(tasks => {
+      tasksCache = tasks;
       sendResponse({ success: true, tasks: tasks });
     }).catch(error => {
-      console.error('Erreur getTasks:', error);
+      console.error('Error getTasks:', error);
       sendResponse({ success: false, error: error.message });
     });
     return true;
@@ -41,7 +43,7 @@ async function getTasks() {
       const token = result.meshy_token;
 
       if (!token) {
-        reject(new Error('Token non trouvé. Assure-toi d\'être sur meshy.ai et d\'attendre le chargement complet.'));
+        reject(new Error('Token no encontrado. Asegúrate de estar en meshy.ai y haber cargado la página.'));
         return;
       }
 
@@ -61,7 +63,7 @@ async function getTasks() {
           const response = await fetch(url, { method: 'GET', headers });
 
           if (!response.ok) {
-            throw new Error(`Erreur API: ${response.status} - ${response.statusText}`);
+            throw new Error(`Error API: ${response.status} - ${response.statusText}`);
           }
 
           const data = await response.json();
@@ -77,8 +79,6 @@ async function getTasks() {
         }
 
         allRootTasks = allRootTasks.filter(t => !t.rootId || t.rootId === t.id);
-
-        console.log(`[Meshy] Found ${allRootTasks.length} root tasks`);
 
         const finalTasks = await Promise.all(allRootTasks.map(async (rootTask) => {
           try {
@@ -105,12 +105,9 @@ async function getTasks() {
           return mapTask(rootTask);
         }));
 
-        const filteredTasks = finalTasks.filter(task => task.modelUrl || (task.parts && task.parts.length > 0))
-          .sort((a, b) => {
-            const dateA = new Date(a.createdAt).getTime();
-            const dateB = new Date(b.createdAt).getTime();
-            return dateB - dateA;
-          });
+        const filteredTasks = finalTasks
+          .filter(task => task.modelUrl || (task.parts && task.parts.length > 0))
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
         console.log(`[Meshy] ${filteredTasks.length} downloadable models found`);
         resolve(filteredTasks);
@@ -133,17 +130,29 @@ function mapTask(task, rootTask) {
   const prompt = task.args?.draft?.prompt || task.args?.texture?.prompt || task.prompt || rootTask?.args?.draft?.prompt || '';
   const texSet = task.result?.texture?.textureUrls?.[0] || {};
   
-  const rawParts = task.result?.parts || task.result?.sub_models || task.result?.split_parts || task.result?.children || task.parts || task.sub_models || [];
-  const parts = Array.isArray(rawParts) ? rawParts.map((p, idx) => ({
-    url: p.modelUrl || p.model_url || p.url || p,
-    filename: p.name ? `${p.name}.glb` : `parte_${idx + 1}.glb`
-  })) : [];
+  // Extraer partes ya sea en Array u Objetos clave-valor
+  const rawParts = task.result?.parts || task.result?.sub_models || task.result?.split_parts || task.result?.children || task.result?.model_urls || task.parts || task.sub_models || [];
+  
+  let parts = [];
+  if (Array.isArray(rawParts)) {
+    parts = rawParts.map((p, idx) => ({
+      url: p.modelUrl || p.model_url || p.url || p,
+      filename: p.name ? `${p.name}.glb` : `parte_${idx + 1}.glb`
+    }));
+  } else if (rawParts && typeof rawParts === 'object') {
+    parts = Object.entries(rawParts).map(([key, val], idx) => ({
+      url: (typeof val === 'object' ? (val.modelUrl || val.model_url || val.url) : val),
+      filename: `${key || 'parte_' + (idx + 1)}.glb`
+    }));
+  }
+
+  const modelUrl = task.result?.texture?.modelUrl || task.result?.generate?.modelUrl || task.result?.draft?.modelUrl || task.result?.stylize?.modelUrl || task.model_url || task.modelUrl || '';
 
   return {
     id: task.id,
-    title: task.name || prompt || 'Sans titre',
+    title: task.name || prompt || 'Modelo 3D',
     status: task.status,
-    modelUrl: task.result?.texture?.modelUrl || task.result?.generate?.modelUrl || task.result?.draft?.modelUrl || task.result?.stylize?.modelUrl || task.model_url || task.modelUrl || '',
+    modelUrl: modelUrl,
     parts: parts,
     createdAt: task.created_at || task.createdAt,
     prompt: prompt,
@@ -161,40 +170,28 @@ function mapTask(task, rootTask) {
   };
 }
 
-async function downloadModel(taskId, modelUrl, filename, parts, targetFormat = 'glb') {
+async function downloadModel(taskId, modelUrl, filename, parts, targetFormat = 'obj') {
   const hasParts = parts && Array.isArray(parts) && parts.length > 0;
   
-  // Enrutar al content script si hay partes, archivo .meshy o si el usuario eligió convertir a OBJ/STL
-  if (hasParts || (modelUrl && modelUrl.includes('.meshy')) || targetFormat !== 'glb') {
-    const tabs = await chrome.tabs.query({ url: ['https://meshy.ai/*', 'https://www.meshy.ai/*'] });
-    if (tabs.length === 0) {
-      console.error('No meshy.ai tab found for download/conversion');
-      return;
-    }
-
-    const ext = targetFormat === 'obj' ? '.obj' : (targetFormat === 'stl' ? '.stl' : '.glb');
-    const baseFilename = filename ? filename.replace(/\.(meshy|glb|obj|stl)$/i, '') : 'modelo';
-    const outFilename = `${baseFilename}${ext}`;
-
-    chrome.tabs.sendMessage(tabs[0].id, {
-      action: 'decryptAndDownload',
-      modelUrl: modelUrl,
-      parts: hasParts ? parts : null,
-      filename: outFilename,
-      targetFormat: targetFormat,
-      requestId: taskId
-    });
-  } else if (modelUrl) {
-    const ext = targetFormat === 'obj' ? '.obj' : (targetFormat === 'stl' ? '.stl' : '.glb');
-    const baseFilename = filename ? filename.replace(/\.(meshy|glb|obj|stl)$/i, '') : 'modelo';
-    const outFilename = `${baseFilename}${ext}`;
-
-    chrome.downloads.download({
-      url: modelUrl,
-      filename: `meshy_models/${outFilename}`,
-      saveAs: true
-    });
+  // Siempre enviamos al content.js para desencriptar el buffer del worker y procesar a OBJ/STL
+  const tabs = await chrome.tabs.query({ url: ['https://meshy.ai/*', 'https://www.meshy.ai/*'] });
+  if (tabs.length === 0) {
+    console.error('No meshy.ai tab found for download/conversion');
+    return;
   }
+
+  const ext = targetFormat === 'stl' ? '.stl' : (targetFormat === 'glb' ? '.glb' : '.obj');
+  const baseFilename = filename ? filename.replace(/\.(meshy|glb|obj|stl)$/i, '') : 'modelo';
+  const outFilename = `${baseFilename}${ext}`;
+
+  chrome.tabs.sendMessage(tabs[0].id, {
+    action: 'decryptAndDownload',
+    modelUrl: modelUrl,
+    parts: hasParts ? parts : null,
+    filename: outFilename,
+    targetFormat: targetFormat, // 'obj' o 'stl'
+    requestId: taskId
+  });
 }
 
 function downloadTexture(taskId, textureUrl, filename) {
