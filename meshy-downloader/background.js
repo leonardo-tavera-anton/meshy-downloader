@@ -10,8 +10,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'saveToken') {
     if (isMeshySender(sender) && isValidToken(request.token)) {
-      chrome.storage.local.set({ meshy_token: request.token });
+      chrome.storage.local.set({ meshy_token: request.token }).then(() => sendResponse({ success: true }));
+      return true;
     }
+    sendResponse({ success: false });
     return;
   }
 
@@ -33,7 +35,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'downloadModel') {
-    downloadModel(request.taskId, request.modelUrl, request.filename, request.parts, request.targetFormat, request.modelUrls)
+    downloadModel(request.taskId, request.modelUrl, request.filename, request.parts, request.targetFormat, request.modelUrls, request.partCount)
       .then(() => sendResponse({ success: true }))
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
@@ -74,7 +76,7 @@ function isValidToken(token) {
 function isValidWasmAuth(auth) {
   return auth && typeof auth.hostname === 'string' && auth.hostname.length <= 255
     && typeof auth.signature === 'string' && auth.signature.length <= 4096
-    && Number.isFinite(auth.timestamp);
+    && Number.isFinite(Number(auth.timestamp));
 }
 
 function isAllowedUrl(value) {
@@ -103,7 +105,23 @@ function isDirectCdnUrl(value) {
   }
 }
 
+async function refreshTokenFromActiveTab() {
+  const tabs = await chrome.tabs.query({
+    active: true,
+    currentWindow: true,
+    url: ['https://meshy.ai/*', 'https://www.meshy.ai/*']
+  });
+  if (tabs.length > 0) {
+    try {
+      await chrome.tabs.sendMessage(tabs[0].id, { action: 'refreshToken' });
+    } catch (error) {
+      console.warn('[Meshy] Could not refresh token from active tab:', error.message);
+    }
+  }
+}
+
 async function getTasks() {
+  await refreshTokenFromActiveTab();
   return new Promise((resolve, reject) => {
     chrome.storage.local.get('meshy_token', async (result) => {
       const token = result.meshy_token;
@@ -123,10 +141,21 @@ async function getTasks() {
         let pageNum = 1;
         const pageSize = 50;
         let hasMore = true;
+        let authRetried = false;
 
         while (hasMore && pageNum <= MAX_TASK_PAGES && allRootTasks.length < MAX_TASKS) {
           const url = `https://api.meshy.ai/web/v2/tasks/?sortBy=-created_at&pageNum=${pageNum}&pageSize=${pageSize}`;
-          const response = await fetch(url, { method: 'GET', headers });
+          let response = await fetch(url, { method: 'GET', headers });
+
+          if (response.status === 401 && !authRetried) {
+            authRetried = true;
+            await refreshTokenFromActiveTab();
+            const refreshed = await chrome.storage.local.get('meshy_token');
+            if (isValidToken(refreshed.meshy_token) && refreshed.meshy_token !== token) {
+              headers.Authorization = `Bearer ${refreshed.meshy_token}`;
+              response = await fetch(url, { method: 'GET', headers });
+            }
+          }
 
           if (!response.ok) {
             if (response.status === 401) await chrome.storage.local.remove('meshy_token');
@@ -163,7 +192,20 @@ async function getTasks() {
                   || relatedTasks.find(t => t.status === 'SUCCEEDED')
                   || relatedTasks[0];
 
-                return mapTask(bestTask, rootTask);
+                  const mappedTask = mapTask(bestTask, rootTask);
+                  const expectedParts = Number(bestTask.part_count || bestTask.result?.part_count || rootTask.part_count || 0);
+                  if (mappedTask.parts.length === 0 && expectedParts > 1) {
+                    const relatedParts = relatedTasks
+                      .filter(relatedTask => relatedTask.status === 'SUCCEEDED')
+                      .map(relatedTask => ({
+                        url: getModelUrls(relatedTask).glb || getModelUrls(relatedTask).gltf || '',
+                        filename: relatedTask.name || `parte_${relatedTask.id}`
+                      }))
+                      .filter(part => part.url)
+                      .filter((part, index, all) => all.findIndex(candidate => candidate.url === part.url) === index);
+                    if (relatedParts.length > 1) mappedTask.parts = relatedParts;
+                  }
+                  return mappedTask;
               }
             }
           } catch (e) {
@@ -203,9 +245,59 @@ function getModelUrls(task) {
     task?.result?.draft?.model_urls
   ];
 
-  return sources.find(source => source && typeof source === 'object' && (source.glb || source.gltf || source.obj || source.stl))
-    || sources.find(source => source && typeof source === 'object')
+  return sources.find(source => source && typeof source === 'object' && !Array.isArray(source)
+      && (source.glb || source.gltf || source.obj || source.stl))
+    || sources.find(source => source && typeof source === 'object' && !Array.isArray(source))
     || {};
+}
+
+function isModelFormatMap(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && ['glb', 'gltf', 'obj', 'stl'].some(format => value[format]);
+}
+
+function getPartUrl(value) {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object') return '';
+  if (value.url || value.modelUrl || value.model_url) return value.url || value.modelUrl || value.model_url;
+  const urls = value.model_urls || value.modelUrls;
+  if (urls && typeof urls === 'object') return urls.glb || urls.gltf || urls.obj || urls.stl || '';
+  return '';
+}
+
+function normalizeParts(rawParts) {
+  if (!rawParts) return [];
+  if (isModelFormatMap(rawParts)) return [];
+  const values = Array.isArray(rawParts) ? rawParts : Object.entries(rawParts).map(([key, value]) => ({ key, value }));
+
+  return values.flatMap((entry, index) => {
+    const item = Array.isArray(rawParts) ? entry : entry.value;
+    const key = Array.isArray(rawParts) ? '' : entry.key;
+    if (Array.isArray(item)) return normalizeParts(item);
+    if (!item || typeof item !== 'object') {
+      const url = getPartUrl(item);
+      return url ? [{ url, filename: `${key || 'parte_' + (index + 1)}.glb` }] : [];
+    }
+
+    const url = getPartUrl(item);
+    if (url) {
+      const name = item.name || item.filename || key || `parte_${index + 1}`;
+      return [{ url, filename: String(name).replace(/\.(glb|gltf|obj|stl)$/i, '') + '.glb' }];
+    }
+
+    return normalizeParts(item.parts || item.sub_models || item.split_parts || item.children || item.model_urls || item.modelUrls);
+  });
+}
+
+function getSegmentedParts(task) {
+  const candidates = [
+    task?.parts, task?.sub_models, task?.split_parts, task?.segments,
+    task?.components, task?.models, task?.result?.parts,
+    task?.result?.sub_models, task?.result?.split_parts, task?.result?.segments,
+    task?.result?.components, task?.result?.models, task?.result?.model_urls
+  ];
+  return candidates.flatMap(normalizeParts)
+    .filter((part, index, all) => all.findIndex(candidate => candidate.url === part.url) === index);
 }
 
 function mapTask(task, rootTask) {
@@ -214,21 +306,7 @@ function mapTask(task, rootTask) {
   const modelUrls = getModelUrls(task);
   const rootModelUrls = getModelUrls(rootTask);
   
-  // Extraer partes ya sea en Array u Objetos clave-valor
-  const rawParts = task.result?.parts || task.result?.sub_models || task.result?.split_parts || task.result?.children || task.result?.model_urls || task.parts || task.sub_models || [];
-  
-  let parts = [];
-  if (Array.isArray(rawParts)) {
-    parts = rawParts.map((p, idx) => ({
-      url: p.modelUrl || p.model_url || p.url || p,
-      filename: p.name ? `${p.name}.glb` : `parte_${idx + 1}.glb`
-    }));
-  } else if (rawParts && typeof rawParts === 'object') {
-    parts = Object.entries(rawParts).map(([key, val], idx) => ({
-      url: (typeof val === 'object' ? (val.modelUrl || val.model_url || val.url) : val),
-      filename: `${key || 'parte_' + (idx + 1)}.glb`
-    }));
-  }
+  const parts = getSegmentedParts(task);
 
   const modelUrl = modelUrls.glb || modelUrls.gltf || rootModelUrls.glb || rootModelUrls.gltf || task.result?.texture?.modelUrl || task.result?.generate?.modelUrl || task.result?.draft?.modelUrl || task.result?.stylize?.modelUrl || task.model_url || task.modelUrl || '';
 
@@ -256,14 +334,14 @@ function mapTask(task, rootTask) {
   };
 }
 
-async function downloadModel(taskId, modelUrl, filename, parts, targetFormat = 'obj', modelUrls = null) {
+async function downloadModel(taskId, modelUrl, filename, parts, targetFormat = 'obj', modelUrls = null, partCount = 0) {
   const hasParts = parts && Array.isArray(parts) && parts.length > 0;
   const safeFormat = ['glb', 'obj', 'stl'].includes(targetFormat) ? targetFormat : 'glb';
   const nativeFormatUrl = modelUrls?.[safeFormat] || '';
   const candidates = hasParts ? parts.map(part => part?.url) : [modelUrl];
   if (!candidates.every(isAllowedUrl)) throw new Error('La URL del modelo no pertenece a un dominio Meshy permitido.');
 
-  if (!hasParts && nativeFormatUrl && isAllowedUrl(nativeFormatUrl) && isDirectCdnUrl(nativeFormatUrl)) {
+  if (safeFormat === 'glb' && !hasParts && nativeFormatUrl && isAllowedUrl(nativeFormatUrl) && isDirectCdnUrl(nativeFormatUrl)) {
     const extension = safeFormat === 'glb' ? 'glb' : safeFormat;
     await chrome.downloads.download({
       url: nativeFormatUrl,
@@ -289,6 +367,7 @@ async function downloadModel(taskId, modelUrl, filename, parts, targetFormat = '
       parts: hasParts ? parts : null,
       filename: outFilename,
       targetFormat: safeFormat,
+      partCount: Number(partCount) || 0,
       requestId: taskId
     });
   } catch (error) {

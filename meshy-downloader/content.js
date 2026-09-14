@@ -9,7 +9,10 @@ function extractTokenFromCookies() {
     let authTokenPart1 = null;
 
     for (let cookie of cookies) {
-      const [name, value] = cookie.split('=');
+      const separator = cookie.indexOf('=');
+      if (separator < 0) continue;
+      const name = cookie.slice(0, separator);
+      const value = cookie.slice(separator + 1);
       const trimmedName = name.trim();
       if (trimmedName === 'sb-auth-auth-token.0') authTokenPart0 = value.trim();
       if (trimmedName === 'sb-auth-auth-token.1') authTokenPart1 = value.trim();
@@ -32,13 +35,46 @@ function extractTokenFromCookies() {
   return token;
 }
 
+function findAccessToken(value) {
+  if (!value || typeof value !== 'object') return '';
+  if (typeof value.access_token === 'string') return value.access_token;
+  for (const child of Object.values(value)) {
+    const token = findAccessToken(child);
+    if (token) return token;
+  }
+  return '';
+}
+
+function extractTokenFromStorage() {
+  try {
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index) || '';
+      const value = localStorage.getItem(key);
+      if (!value || (!key.includes('auth') && !key.includes('token') && !key.includes('supabase'))) continue;
+      try {
+        const token = findAccessToken(JSON.parse(value));
+        if (token) return token;
+      } catch (error) {
+        // Ignore non-JSON storage entries.
+      }
+    }
+  } catch (error) {
+    console.warn('[Meshy DL] Could not inspect local session storage');
+  }
+  return '';
+}
+
+function extractCurrentToken() {
+  return extractTokenFromCookies() || extractTokenFromStorage();
+}
+
 function saveToken(token) {
   if (typeof token !== 'string' || token.length < 20 || token.length > 4096) return;
-  chrome.runtime.sendMessage({ action: 'saveToken', token }).catch(() => {});
+  return chrome.runtime.sendMessage({ action: 'saveToken', token }).catch(() => {});
 }
 
 setTimeout(() => {
-  const token = extractTokenFromCookies();
+  const token = extractCurrentToken();
   if (token) saveToken(token);
 }, 1500);
 
@@ -72,6 +108,16 @@ let decryptWorker = null;
 let workerReady = false;
 let pendingOps = {};
 let opCounter = 0;
+
+async function restoreWasmAuth() {
+  if (wasmAuth) return;
+
+  const stored = await chrome.storage.session.get('meshy_wasm_auth');
+  const auth = stored.meshy_wasm_auth;
+  if (auth?.hostname && auth?.signature && Number.isFinite(Number(auth.timestamp))) {
+    wasmAuth = auth;
+  }
+}
 
 function initDecryptWorker() {
   return new Promise((resolve, reject) => {
@@ -143,8 +189,9 @@ function ensureArrayBuffer(data) {
 
 function isGlbBuffer(data) {
   const buffer = ensureArrayBuffer(data);
-  return buffer instanceof ArrayBuffer && buffer.byteLength >= 4
-    && new DataView(buffer).getUint32(0, true) === 0x46544C67;
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 4) return false;
+  const bytes = new Uint8Array(buffer, 0, 4);
+  return bytes[0] === 0x67 && bytes[1] === 0x6c && bytes[2] === 0x54 && bytes[3] === 0x46;
 }
 
 async function fetchModelBuffer(url) {
@@ -187,9 +234,9 @@ function describeBuffer(data) {
   return `${buffer.byteLength} bytes (firma: ${signature || 'vacía'})`;
 }
 
-async function decryptAndDownload(modelInput, filename, requestId, targetFormat = 'glb') {
+async function decryptAndDownload(modelInput, filename, requestId, targetFormat = 'glb', partCount = 0) {
   try {
-    await initDecryptWorker();
+    await restoreWasmAuth();
 
     const parts = Array.isArray(modelInput) ? modelInput : [{ url: modelInput, filename: filename }];
 
@@ -207,7 +254,8 @@ async function decryptAndDownload(modelInput, filename, requestId, targetFormat 
 
       // Some Meshy tasks already provide a GLB. Sending it through the
       // proprietary decoder can turn a valid file into an invalid payload.
-      if (!isGlbBuffer(rawBuffer) && decryptWorker && workerReady) {
+      if (!isGlbBuffer(rawBuffer)) {
+        if (!decryptWorker || !workerReady) await initDecryptWorker();
         chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: `decrypting (${i + 1}/${parts.length})` });
         const originalBuffer = rawBuffer.slice(0);
         rawBuffer = await processWithWorker(rawBuffer, 'default');
@@ -220,7 +268,7 @@ async function decryptAndDownload(modelInput, filename, requestId, targetFormat 
       }
 
       const glbData = ensureArrayBuffer(rawBuffer);
-      await processAndSaveBlob(glbData, targetFormat, currentFilename);
+      await processAndSaveBlob(glbData, targetFormat, currentFilename, partCount);
     }
 
     chrome.runtime.sendMessage({ action: 'decryptStatus', requestId, status: 'done' });
@@ -232,18 +280,41 @@ async function decryptAndDownload(modelInput, filename, requestId, targetFormat 
 }
 
 // ===== CONVERSION & DOWNLOAD UTILS =====
-async function processAndSaveBlob(glbData, targetFormat, currentFilename) {
+async function processAndSaveBlob(glbData, targetFormat, currentFilename, partCount = 0) {
   const buffer = ensureArrayBuffer(glbData);
   if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 4) {
     throw new Error(`Meshy devolvió una respuesta inválida: ${describeBuffer(buffer)}.`);
   }
-  const view = new DataView(buffer);
-  const magic = view.getUint32(0, true);
-  if (magic !== 0x46544C67) {
+  if (!isGlbBuffer(buffer)) {
     throw new Error(`Meshy no devolvió un GLB después del descifrado: ${describeBuffer(buffer)}.`);
   }
 
+  if (targetFormat === 'glb') {
+    triggerDownload(new Blob([buffer], { type: 'model/gltf-binary' }), currentFilename);
+    return;
+  }
+
   try {
+    const meshCount = getGLBMeshCount(buffer);
+    const shouldSplit = meshCount > 1;
+    if (shouldSplit) {
+      const extension = targetFormat === 'obj' ? '.obj' : '.stl';
+      const baseName = currentFilename.replace(/\.(obj|stl)$/i, '');
+      let savedParts = 0;
+      for (let meshIndex = 0; meshIndex < meshCount; meshIndex++) {
+        const meshGeometry = parseGLBGeometry(buffer, meshIndex);
+        if (meshGeometry.positions.length > 0) {
+          const partName = `${baseName}_parte_${meshIndex + 1}${extension}`;
+          const partBlob = targetFormat === 'obj'
+            ? convertGeometryToOBJ(meshGeometry)
+            : convertGeometryToSTL(meshGeometry);
+          triggerDownload(partBlob, partName);
+          savedParts++;
+        }
+      }
+      if (savedParts > 0) return;
+    }
+
     const geometry = parseGLBGeometry(buffer);
 
     if (!geometry || geometry.positions.length === 0) {
@@ -266,13 +337,38 @@ async function processAndSaveBlob(glbData, targetFormat, currentFilename) {
   }
 }
 
-function parseGLBGeometry(inputBuffer) {
+function getGLBMeshCount(inputBuffer) {
+  const arrayBuffer = ensureArrayBuffer(inputBuffer);
+  const dataView = new DataView(arrayBuffer);
+  const jsonChunkLength = dataView.getUint32(12, true);
+  const jsonBytes = new Uint8Array(arrayBuffer, 20, jsonChunkLength);
+  const gltf = JSON.parse(new TextDecoder('utf-8').decode(jsonBytes));
+  return (gltf.meshes || []).reduce((count, mesh) => count + (mesh.primitives || [])
+    .filter(primitive => primitive.attributes?.POSITION !== undefined).length, 0);
+}
+
+function getComponentSize(componentType) {
+  if (componentType === 5120 || componentType === 5121) return 1;
+  if (componentType === 5122 || componentType === 5123) return 2;
+  if (componentType === 5125 || componentType === 5126) return 4;
+  throw new Error('Tipo de componente glTF no compatible.');
+}
+
+function readComponent(dataView, offset, componentType) {
+  if (componentType === 5120) return dataView.getInt8(offset);
+  if (componentType === 5121) return dataView.getUint8(offset);
+  if (componentType === 5122) return dataView.getInt16(offset, true);
+  if (componentType === 5123) return dataView.getUint16(offset, true);
+  if (componentType === 5125) return dataView.getUint32(offset, true);
+  return dataView.getFloat32(offset, true);
+}
+
+function parseGLBGeometry(inputBuffer, selectedMeshIndex = null) {
   const arrayBuffer = ensureArrayBuffer(inputBuffer);
   const dataView = new DataView(arrayBuffer);
   if (arrayBuffer.byteLength < 20) throw new Error('El archivo GLB está incompleto.');
 
-  const magic = dataView.getUint32(0, true);
-  if (magic !== 0x46544C67) throw new Error('El archivo no es un GLB válido.');
+  if (!isGlbBuffer(arrayBuffer)) throw new Error('El archivo no es un GLB válido.');
   const version = dataView.getUint32(4, true);
   const declaredLength = dataView.getUint32(8, true);
   if (version !== 2 || declaredLength > arrayBuffer.byteLength || declaredLength < 20) {
@@ -302,24 +398,35 @@ function parseGLBGeometry(inputBuffer) {
   let allIndices = [];
   let vertexOffset = 0;
 
-  for (const mesh of gltf.meshes || []) {
+  let geometryIndex = 0;
+  for (let meshIndex = 0; meshIndex < (gltf.meshes || []).length; meshIndex++) {
+    const mesh = gltf.meshes[meshIndex];
     for (const primitive of mesh.primitives || []) {
       if (primitive.attributes.POSITION === undefined) continue;
+      const currentGeometryIndex = geometryIndex++;
+      if (selectedMeshIndex !== null && currentGeometryIndex !== selectedMeshIndex) continue;
       if (primitive.mode !== undefined && primitive.mode !== 4) continue;
 
       const posAccessor = gltf.accessors[primitive.attributes.POSITION];
       const posBufferView = posAccessor ? gltf.bufferViews[posAccessor.bufferView] : null;
-      if (!posAccessor || !posBufferView || posAccessor.type !== 'VEC3' || posAccessor.componentType !== 5126) {
+      if (!posAccessor || !posBufferView || posAccessor.type !== 'VEC3'
+        || ![5120, 5121, 5122, 5123, 5125, 5126].includes(posAccessor.componentType)) {
         throw new Error('El modelo contiene posiciones incompatibles.');
       }
 
-      const posStride = posBufferView.byteStride || 12;
+      const positionComponentSize = getComponentSize(posAccessor.componentType);
+      const positionElementSize = positionComponentSize * 3;
+      const posStride = posBufferView.byteStride || positionElementSize;
       const posStart = binBufferOffset + (posBufferView.byteOffset || 0) + (posAccessor.byteOffset || 0);
-      const posEnd = posStart + (posAccessor.count - 1) * posStride + 12;
+      const posEnd = posStart + (posAccessor.count - 1) * posStride + positionElementSize;
       if (posStart < binBufferOffset || posEnd > binBufferEnd) throw new Error('Posiciones fuera de rango.');
       for (let i = 0; i < posAccessor.count; i++) {
         const offset = posStart + i * posStride;
-        allPositions.push(dataView.getFloat32(offset, true), dataView.getFloat32(offset + 4, true), dataView.getFloat32(offset + 8, true));
+        allPositions.push(
+          readComponent(dataView, offset, posAccessor.componentType),
+          readComponent(dataView, offset + positionComponentSize, posAccessor.componentType),
+          readComponent(dataView, offset + positionComponentSize * 2, posAccessor.componentType)
+        );
       }
 
       if (primitive.indices !== undefined) {
@@ -432,8 +539,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     
     const payload = (request.parts && request.parts.length > 0) ? request.parts : request.modelUrl;
     const targetFormat = request.targetFormat || 'glb';
+    const partCount = Number(request.partCount) || 0;
     
-    decryptAndDownload(payload, request.filename, request.requestId, targetFormat);
+    decryptAndDownload(payload, request.filename, request.requestId, targetFormat, partCount);
     sendResponse({ success: true });
   }
+});
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action !== 'refreshToken') return;
+  const token = extractCurrentToken();
+  if (!token) {
+    sendResponse({ success: false });
+    return;
+  }
+  saveToken(token).then(() => sendResponse({ success: true }));
+  return true;
 });

@@ -172,6 +172,7 @@ async function downloadModel(task, button) {
       modelUrl: task.modelUrl,
       filename: `meshy_${task.id}`,
       parts: task.parts?.length ? task.parts : null,
+      partCount: task.partCount,
       targetFormat: formatSelect.value,
       modelUrls: task.modelUrls
     });
